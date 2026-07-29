@@ -1,10 +1,30 @@
 # hongtai-panel
 
-Linux driver for HONGTAI / LOVINGCOOL USB serial LCD panels — the small
-secondary screens built into AIO CPU coolers. USB ID `33c3:7791`.
+**Linux support for the LCD screen on LovingCool AIO CPU coolers.**
 
-Replaces the Windows-only "Screen Driver Software.exe" (an Electron app called
-LOVINGCOOL MONITOR), which has no Linux build.
+These coolers ship a small square display on the pump head, and the only
+software for it is Windows-only — "Screen Driver Software.exe", an Electron app
+called *LOVINGCOOL MONITOR*. There is no Linux build, so on Linux the screen
+just sits blank. This project drives it.
+
+<!-- Also sold under other brand names; the panel identifies itself as HONGTAI.
+     Searchable terms: LovingCool AIO LCD Linux, HONGTAI MONITOR 33c3:7791,
+     TXW818-ST7701S, AIO cooler screen Linux driver. -->
+
+| | |
+| --- | --- |
+| Hardware | LovingCool AIO cooler LCD (pump-head screen) |
+| USB ID | `33c3:7791` — reports as `HONGTAI MONITOR` |
+| Confirmed model | `TXW818-ST7701S-4.0inch`, 480×480, firmware 3.1 |
+| Replaces | LOVINGCOOL MONITOR (Windows only) |
+
+Check yours with `lsusb | grep 33c3:7791`. Other panels in the same family
+should work too — the software asks the device for its own geometry, frame
+budget, and pixel format rather than assuming.
+
+What you get: a live CPU/GPU/RAM dashboard, wallpapers and video/GIF playlists,
+the dashboard drawn *over* those backgrounds, or a mirror of any monitor or
+window — with a GTK4 control panel and a systemd service that starts it at login.
 
 ## Why there is no kernel driver here
 
