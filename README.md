@@ -18,16 +18,61 @@ protocol, not of a kernel module.
 ## Install
 
 ```bash
-pip install --user -e .
-sudo hongtai-panel install-udev     # grants device access, then replug the panel
+git clone <this-repo> hongtai-panel && cd hongtai-panel
+./install.sh
 ```
 
-Desktop mirroring additionally needs PyGObject and the GStreamer PipeWire
-plugin. On Fedora/Bazzite these are usually already present; otherwise:
+The script checks dependencies, installs the package, adds the udev rule, adds
+the app-menu entry, and enables the autostart service. Pass `--no-service` to
+skip autostart. Re-running upgrades in place and leaves your config alone.
+**Replug the panel afterwards** so the udev rule takes effect.
+
+### System dependencies
+
+Python 3.10+, plus Pillow / psutil / pyserial (pip installs these for you).
+Everything else is optional and only disables one feature if absent — the
+install script reports what it finds.
+
+| For | Package |
+| --- | --- |
+| Video and GIF backgrounds | `ffmpeg` |
+| The GUI | GTK4 + PyGObject |
+| Screen mirroring | GStreamer with the PipeWire plugin |
 
 ```bash
-sudo dnf install python3-gobject gstreamer1-plugin-pipewire gstreamer1-plugins-good
+# Fedora / Bazzite / RHEL
+sudo dnf install ffmpeg python3-gobject gtk4 \
+    gstreamer1-plugin-pipewire gstreamer1-plugins-good
+
+# Debian / Ubuntu
+sudo apt install ffmpeg python3-gi python3-gi-cairo gir1.2-gtk-4.0 \
+    gstreamer1.0-pipewire gstreamer1.0-plugins-good
+
+# Arch
+sudo pacman -S ffmpeg python-gobject gtk4 gst-plugin-pipewire gst-plugins-good
 ```
+
+### Moving it to another machine
+
+Any of these work; the install script is the same either way.
+
+```bash
+# 1. Clone from wherever you host it
+git clone <url> && cd hongtai-panel && ./install.sh
+
+# 2. Straight from this machine over SSH
+git clone ssh://user@thishost/path/to/hongtai-panel
+
+# 3. Tarball, no git needed
+tar czf hongtai-panel.tar.gz --exclude=.git --exclude=__pycache__ hongtai-panel/
+scp hongtai-panel.tar.gz user@other:  # then: tar xzf … && cd … && ./install.sh
+```
+
+Your settings live in `~/.config/hongtai-panel/config.json` and are *not* part
+of the repo — copy that file across too if you want the same theme and layout.
+Nothing in the code is tied to this machine: the panel is found by USB ID rather
+than by device path, and geometry, frame budget, and pixel format all come from
+the panel's own `0x06` reply, so a different model configures itself.
 
 ## Use
 
@@ -242,8 +287,26 @@ in every theme dropdown in the GUI automatically.
 | --- | --- |
 | Panel | `TXW818-ST7701S-4.0inch`, firmware 3.1, 480×480, uid `C8159D15741F` |
 | Host | Bazzite 44, KDE Plasma on Wayland, i5-13400F + NVIDIA |
-| Verified | `info`, `monitor` (both themes), `show`, `play` — 23.6 fps sustained at 25 fps requested |
-| Unverified | `mirror`, and RGB565 output (no SPI panel to hand) |
+| Verified | `info`, stats dashboard (both layouts), media playlists, stats-over-background, 23.6 fps sustained at 25 requested |
+| Unverified | `mirror`; RGB565 output (no SPI panel to hand); AMD/Intel GPU readings (parsing tested against a synthetic sysfs tree, not real hardware) |
+
+## Hardware support
+
+GPU telemetry picks a backend automatically:
+
+| Vendor | Source | Notes |
+| --- | --- | --- |
+| AMD | `amdgpu` sysfs | utilisation, temperature, VRAM, power |
+| Intel | `i915` / `xe` sysfs | utilisation; other fields depend on the driver |
+| NVIDIA | `nvidia-smi` | utilisation, temperature, VRAM, power |
+
+sysfs is preferred where available because it reads inline with no subprocess.
+`nvidia-smi` costs about 100 ms per call, so it is polled on a background thread
+and never faster than once a second. A machine with no recognised GPU simply
+leaves those tiles blank rather than failing.
+
+CPU temperature comes from `coretemp`, `k10temp`, or `zenpower`, falling back to
+whatever psutil exposes.
 
 ## Other panels
 
