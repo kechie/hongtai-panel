@@ -1,0 +1,20 @@
+[Unit]
+Description=HONGTAI LCD panel system monitor
+Documentation=https://github.com/local/hongtai-panel
+# Wait for the panel's tty to appear rather than racing udev at boot.
+After=dev-hongtai\x2dpanel.device
+Wants=dev-hongtai\x2dpanel.device
+# The panel may not be enumerated yet on a cold boot; retry indefinitely.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Everything (mode, layout, fps, brightness, theme) comes from
+# ~/.config/hongtai-panel/config.json, which the GUI edits.
+ExecStart=%h/.local/bin/hongtai-panel run
+ExecStopPost=-%h/.local/bin/hongtai-panel clear
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

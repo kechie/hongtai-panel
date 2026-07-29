@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=LCD Panel
+GenericName=AIO Screen Control
+Comment=Control the HONGTAI LCD panel on your AIO cooler
+Exec=hongtai-panel gui
+Icon=video-display
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=lcd;panel;aio;cooler;monitor;screen;
+StartupNotify=true
