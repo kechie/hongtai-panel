@@ -38,8 +38,8 @@ protocol, not of a kernel module.
 ## Install
 
 ```bash
-git clone <this-repo> hongtai-panel && cd hongtai-panel
-./install.sh
+git clone https://github.com/GOG1071/hongtai-panel.git
+cd hongtai-panel && ./install.sh
 ```
 
 The script checks dependencies, installs the package, adds the udev rule, adds
@@ -77,22 +77,15 @@ sudo pacman -S ffmpeg python-gobject gtk4 gst-plugin-pipewire gst-plugins-good
 Any of these work; the install script is the same either way.
 
 ```bash
-# 1. Clone from wherever you host it
-git clone <url> && cd hongtai-panel && ./install.sh
-
-# 2. Straight from this machine over SSH
-git clone ssh://user@thishost/path/to/hongtai-panel
-
-# 3. Tarball, no git needed
-tar czf hongtai-panel.tar.gz --exclude=.git --exclude=__pycache__ hongtai-panel/
-scp hongtai-panel.tar.gz user@other:  # then: tar xzf … && cd … && ./install.sh
+git clone https://github.com/GOG1071/hongtai-panel.git
+cd hongtai-panel && ./install.sh
 ```
 
 Your settings live in `~/.config/hongtai-panel/config.json` and are *not* part
 of the repo — copy that file across too if you want the same theme and layout.
-Nothing in the code is tied to this machine: the panel is found by USB ID rather
-than by device path, and geometry, frame budget, and pixel format all come from
-the panel's own `0x06` reply, so a different model configures itself.
+Nothing in the code is machine-specific: the panel is found by USB ID rather
+than device path, and geometry, frame budget, and pixel format all come from the
+panel's own `0x06` reply, so a different model configures itself.
 
 ## Use
 
@@ -239,7 +232,7 @@ Replies carry UTF-8 JSON between the 5-byte head and the 2-byte checksum, with
 the useful fields nested one level down under `data`:
 
 ```json
-{"status":200,"cmd":"info","data":{"uid":"C8159D15741F","width":480,"height":480,
+{"status":200,"cmd":"info","data":{"uid":"XXXXXXXXXXXX","width":480,"height":480,
  "model":"TXW818-ST7701S-4.0inch","version":"3.1","angle":270,"brightness":80,
  "shape":"0BB1","region":"","diplay_on":true}}
 ```
@@ -305,7 +298,7 @@ in every theme dropdown in the GUI automatically.
 
 | | |
 | --- | --- |
-| Panel | `TXW818-ST7701S-4.0inch`, firmware 3.1, 480×480, uid `C8159D15741F` |
+| Panel | `TXW818-ST7701S-4.0inch`, firmware 3.1, 480×480, uid `XXXXXXXXXXXX` |
 | Host | Bazzite 44, KDE Plasma on Wayland, i5-13400F + NVIDIA |
 | Verified | `info`, stats dashboard (both layouts), media playlists, stats-over-background, 23.6 fps sustained at 25 requested |
 | Unverified | `mirror`; RGB565 output (no SPI panel to hand); AMD/Intel GPU readings (parsing tested against a synthetic sysfs tree, not real hardware) |
