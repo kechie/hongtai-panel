@@ -46,7 +46,7 @@ def open_panel(args) -> Panel:
             raise SystemExit(
                 f"Permission denied on {port}.\n\n"
                 f"Grant access with:\n"
-                f"  sudo {Path(sys.argv[0]).name} install-udev\n"
+                f"  {Path(sys.argv[0]).name} install-udev\n"
                 f"then unplug and replug the panel."
             ) from None
         raise SystemExit(f"Could not open {port}: {exc}") from None
@@ -245,36 +245,49 @@ UDEV_RULE = (
 UDEV_PATH = Path("/etc/udev/rules.d/99-hongtai-panel.rules")
 
 
+def root_prefix() -> list[str]:
+    """argv prefix that runs a command as root.
+
+    sudo when there is a terminal to ask on, pkexec otherwise: the GUI is
+    launched from the app menu with no tty, where sudo has nowhere to prompt.
+    """
+    import os
+    import shutil
+
+    if os.geteuid() == 0:
+        return []
+    if sys.stdin is not None and sys.stdin.isatty():
+        return ["sudo"]
+    return ["pkexec"] if shutil.which("pkexec") else ["sudo"]
+
+
 def cmd_install_udev(args) -> int:
     """Grant the logged-in user access without touching group membership.
 
     TAG+="uaccess" makes systemd-logind hand the device to whoever is at the
     seat, which survives reboots and needs no re-login.
 
-    Escalates via `sudo` on the shell rather than expecting to be run as root:
-    a --user pip install is not importable from root's interpreter, so
+    Escalates the work rather than expecting to be run as root: a --user pip
+    install is not importable from root's interpreter, so
     `sudo hongtai-panel install-udev` would fail before reaching this code.
+    Write and reload go in one shell so there is a single password prompt.
     """
     import os
     import subprocess
 
-    if os.geteuid() == 0:
-        UDEV_PATH.write_text(UDEV_RULE)
-    else:
-        print(f"Writing {UDEV_PATH} (needs root; you may be prompted for your password)")
-        result = subprocess.run(
-            ["sudo", "tee", str(UDEV_PATH)],
-            input=UDEV_RULE, text=True, stdout=subprocess.DEVNULL,
-        )
-        if result.returncode != 0:
-            print("\nCould not write the rule. Do it manually:\n")
-            print(f"  sudo tee {UDEV_PATH} <<'EOF'\n{UDEV_RULE}EOF")
-            print("  sudo udevadm control --reload-rules && sudo udevadm trigger")
-            return 1
-
-    prefix = [] if os.geteuid() == 0 else ["sudo"]
-    subprocess.run(prefix + ["udevadm", "control", "--reload-rules"], check=False)
-    subprocess.run(prefix + ["udevadm", "trigger", "--subsystem-match=tty"], check=False)
+    script = (
+        "set -e\n"
+        f"cat > {UDEV_PATH} <<'EOF'\n{UDEV_RULE}EOF\n"
+        "udevadm control --reload-rules\n"
+        "udevadm trigger --subsystem-match=tty\n"
+    )
+    print(f"Writing {UDEV_PATH} (needs root; you may be prompted for your password)")
+    result = subprocess.run(root_prefix() + ["/bin/sh", "-c", script])
+    if result.returncode != 0:
+        print("\nCould not write the rule. Do it manually:\n")
+        print(f"  sudo tee {UDEV_PATH} <<'EOF'\n{UDEV_RULE}EOF")
+        print("  sudo udevadm control --reload-rules && sudo udevadm trigger")
+        return 1
 
     print(f"Installed {UDEV_PATH}")
     if Path("/dev/ttyACM0").exists() and not os.access("/dev/ttyACM0", os.R_OK | os.W_OK):

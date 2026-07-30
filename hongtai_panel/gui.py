@@ -22,6 +22,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
+from .cli import UDEV_PATH, cmd_install_udev  # noqa: E402
 from .config import (  # noqa: E402
     IMAGE_SUFFIXES, MODES, PREVIEW_PATH, VIDEO_SUFFIXES, Config, Theme, is_video,
 )
@@ -440,6 +441,17 @@ class Window(Gtk.ApplicationWindow):
         # restart already in flight.
         if self._syncing:
             return False
+        if state and not UDEV_PATH.exists():
+            # Without the rule the service starts and immediately dies on
+            # EACCES, which reads as "the switch is broken". Ask for the rule
+            # instead. The window is unresponsive while the auth dialog is up.
+            self._flash("Installing udev rule…")
+            while GLib.MainContext.default().iteration(False):
+                pass  # paint the label before blocking on the password prompt
+            if cmd_install_udev(None) != 0:
+                self._flash("Could not install the udev rule — panel needs device access")
+                self._set_switch(False)
+                return True
         result = systemctl("start" if state else "stop", SERVICE)
         if result.returncode != 0:
             self._flash(f"Service {'start' if state else 'stop'} failed")
@@ -503,6 +515,14 @@ class Window(Gtk.ApplicationWindow):
         self.media_label.set_text(self._summarise_media())
         self._touch()
 
+    def _set_switch(self, state: bool) -> None:
+        """Move the switch without re-entering the start/stop handler."""
+        self._syncing = True
+        try:
+            self.switch.set_active(state)
+        finally:
+            self._syncing = False
+
     def _flash(self, text: str) -> None:
         self.status.set_text(text)
         GLib.timeout_add_seconds(4, lambda: (self.status.set_text(""), False)[1])
@@ -510,11 +530,7 @@ class Window(Gtk.ApplicationWindow):
     # -- preview loop ---------------------------------------------------
 
     def _tick(self) -> bool:
-        self._syncing = True
-        try:
-            self.switch.set_active(service_active())
-        finally:
-            self._syncing = False
+        self._set_switch(service_active())
         try:
             self._update_preview()
         except Exception as exc:  # a broken preview must not kill the GUI
