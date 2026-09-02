@@ -26,7 +26,7 @@ EOI = b"\xff\xd9"
 
 
 def sysmon_frames(info: PanelInfo, layout: str, fps: int, theme=None,
-                  sample_interval: float = 1.0) -> Iterator[bytes]:
+                  sample_interval: float = 1.0, rotation: int = 0) -> Iterator[bytes]:
     """Render the system-monitor dashboard at a fixed cadence.
 
     Frames are produced at `fps`, but telemetry only re-samples every
@@ -37,27 +37,32 @@ def sysmon_frames(info: PanelInfo, layout: str, fps: int, theme=None,
     theme = theme or Theme()
     fonts = render.Fonts()
     collector = Collector(sample_interval)
-    size = (info.width, info.height)
+    size = render.logical_size(info.width, info.height, rotation)
     interval = 1.0 / max(1, fps)
     spi = info.is_spi
 
     while True:
         started = time.monotonic()
         img = render.render(collector.read(), size, fonts, theme, layout)
+        if rotation:
+            img = render.rotate_cw(img, rotation)
         yield render.encode_rgb565(img) if spi else render.encode(img, info.max_frame_kb)
         time.sleep(max(0.0, interval - (time.monotonic() - started)))
 
 
-def _encode_still(path: Path, info: PanelInfo, fit: str) -> bytes:
+def _encode_still(path: Path, info: PanelInfo, fit: str, rotation: int = 0) -> bytes:
     with Image.open(path) as im:
-        fitted = render.fit_image(im, (info.width, info.height), fit)
+        fitted = render.fit_image(im, render.logical_size(info.width, info.height, rotation), fit)
+    if rotation:
+        fitted = render.rotate_cw(fitted, rotation)
     return (render.encode_rgb565(fitted) if info.is_spi
             else render.encode(fitted, info.max_frame_kb))
 
 
-def image_frames(paths: list[Path], info: PanelInfo, interval: float, fit: str) -> Iterator[bytes]:
+def image_frames(paths: list[Path], info: PanelInfo, interval: float, fit: str,
+                 rotation: int = 0) -> Iterator[bytes]:
     """Cycle through still images, re-sending each to hold it on screen."""
-    encoded = [_encode_still(p, info, fit) for p in paths]
+    encoded = [_encode_still(p, info, fit, rotation) for p in paths]
     if not encoded:
         raise ValueError("no images to display")
 
@@ -70,7 +75,8 @@ def image_frames(paths: list[Path], info: PanelInfo, interval: float, fit: str) 
 
 
 def media_frames(paths: list[Path], info: PanelInfo, fps: int, image_interval: float,
-                 fit: str, loop: bool = True, quality: int = 6) -> Iterator[bytes]:
+                 fit: str, loop: bool = True, quality: int = 6,
+                 rotation: int = 0) -> Iterator[bytes]:
     """Play an ordered playlist of stills and clips.
 
     Stills are held for `image_interval`; clips play through once so the
@@ -87,16 +93,17 @@ def media_frames(paths: list[Path], info: PanelInfo, fps: int, image_interval: f
     single_video = len(paths) == 1 and len(videos) == 1
 
     if single_video:
-        yield from video_frames(paths[0], info, fps, fit, loop, quality)
+        yield from video_frames(paths[0], info, fps, fit, loop, quality, rotation)
         return
 
     # Stills are decoded once up front; clips stream on demand.
-    stills = {p: _encode_still(p, info, fit) for p in paths if not is_video(p)}
+    stills = {p: _encode_still(p, info, fit, rotation) for p in paths if not is_video(p)}
 
     while True:
         for path in paths:
             if is_video(path):
-                yield from video_frames(path, info, fps, fit, loop=False, quality=quality)
+                yield from video_frames(path, info, fps, fit, loop=False,
+                                        quality=quality, rotation=rotation)
             else:
                 deadline = time.monotonic() + image_interval
                 while time.monotonic() < deadline:
@@ -129,8 +136,13 @@ def _split_mjpeg(stream, chunk_size: int = 65536) -> Iterator[bytes]:
             buf = buf[end + 2 :]
 
 
-def _ffmpeg_scale_filter(info: PanelInfo, fit: str) -> str:
-    w, h = info.width, info.height
+# ffmpeg's transpose is defined counter-clockwise-ish; these give clockwise
+# rotation to match rotate_cw's convention. 180 has no dedicated transpose, so
+# it is composed from two flips instead.
+_FFMPEG_ROTATE = {90: "transpose=1", 180: "hflip,vflip", 270: "transpose=2"}
+
+
+def _ffmpeg_scale_filter(w: int, h: int, fit: str) -> str:
     if fit == "contain":
         return f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:-1:-1:color=black"
     if fit == "stretch":
@@ -139,16 +151,23 @@ def _ffmpeg_scale_filter(info: PanelInfo, fit: str) -> str:
 
 
 def video_frames(
-    path: Path, info: PanelInfo, fps: int, fit: str, loop: bool, quality: int = 6
+    path: Path, info: PanelInfo, fps: int, fit: str, loop: bool, quality: int = 6,
+    rotation: int = 0,
 ) -> Iterator[bytes]:
     """Decode video/GIF through ffmpeg straight into panel-sized MJPEG.
 
-    ffmpeg does the scaling and JPEG encoding, so no per-frame Pillow work.
+    ffmpeg does the scaling, rotation, and JPEG encoding, so no per-frame
+    Pillow work.
     """
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg not found")
 
-    vf = _ffmpeg_scale_filter(info, fit) + f",fps={fps}"
+    lw, lh = render.logical_size(info.width, info.height, rotation)
+    vf = _ffmpeg_scale_filter(lw, lh, fit)
+    rot = _FFMPEG_ROTATE.get(rotation % 360)
+    if rot:
+        vf += f",{rot}"
+    vf += f",fps={fps}"
 
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
     if loop:
@@ -180,18 +199,20 @@ def video_frames(
 
 
 def _video_raw_frames(path: Path, info: PanelInfo, fps: int, fit: str,
-                      loop: bool) -> Iterator[Image.Image]:
-    """Decode a clip to panel-sized RGB frames.
+                      loop: bool, rotation: int = 0) -> Iterator[Image.Image]:
+    """Decode a clip to logically-oriented, panel-sized RGB frames.
 
     Raw RGB rather than MJPEG: the frames are about to be composited and
-    re-encoded anyway, so decoding a JPEG here would be wasted work.
+    re-encoded anyway, so decoding a JPEG here would be wasted work. Not
+    rotated here — the caller composites onto these first and rotates the
+    finished frame once, rather than rotating every background frame.
     """
-    w, h = info.width, info.height
+    w, h = render.logical_size(info.width, info.height, rotation)
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
     if loop:
         cmd += ["-stream_loop", "-1"]
     cmd += ["-re", "-i", str(path), "-an",
-            "-vf", _ffmpeg_scale_filter(info, fit) + f",fps={fps}",
+            "-vf", _ffmpeg_scale_filter(w, h, fit) + f",fps={fps}",
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
 
     frame_bytes = w * h * 3
@@ -212,11 +233,11 @@ def _video_raw_frames(path: Path, info: PanelInfo, fps: int, fit: str,
 
 
 def background_images(paths: list[Path], info: PanelInfo, fps: int, image_interval: float,
-                      fit: str, loop: bool) -> Iterator[Image.Image]:
-    """Yield background frames from the playlist, paced for `fps`."""
+                      fit: str, loop: bool, rotation: int = 0) -> Iterator[Image.Image]:
+    """Yield logically-oriented background frames from the playlist, paced for `fps`."""
     from .config import is_video
 
-    size = (info.width, info.height)
+    size = render.logical_size(info.width, info.height, rotation)
     stills: dict[Path, Image.Image] = {}
     for p in paths:
         if not is_video(p):
@@ -228,7 +249,7 @@ def background_images(paths: list[Path], info: PanelInfo, fps: int, image_interv
         for path in paths:
             if is_video(path):
                 single = len(paths) == 1
-                yield from _video_raw_frames(path, info, fps, fit, loop and single)
+                yield from _video_raw_frames(path, info, fps, fit, loop and single, rotation)
             else:
                 still = stills[path]
                 deadline = time.monotonic() + image_interval
@@ -243,22 +264,22 @@ def background_images(paths: list[Path], info: PanelInfo, fps: int, image_interv
 def display_frames(info: PanelInfo, paths: list[Path], overlay: bool, layout: str,
                    fps: int, theme=None, sample_interval: float = 1.0,
                    image_interval: float = 10.0, fit: str = "cover",
-                   loop: bool = True, quality: int = 6) -> Iterator[bytes]:
+                   loop: bool = True, quality: int = 6, rotation: int = 0) -> Iterator[bytes]:
     """The unified display source: stats, media, or stats over media."""
     from .config import Theme
 
     theme = theme or Theme()
 
     if not paths:
-        yield from sysmon_frames(info, layout, fps, theme, sample_interval)
+        yield from sysmon_frames(info, layout, fps, theme, sample_interval, rotation)
         return
     if not overlay:
-        yield from media_frames(paths, info, fps, image_interval, fit, loop, quality)
+        yield from media_frames(paths, info, fps, image_interval, fit, loop, quality, rotation)
         return
 
     fonts = render.Fonts()
     collector = Collector(sample_interval)
-    size = (info.width, info.height)
+    size = render.logical_size(info.width, info.height, rotation)
 
     # The stats layer only changes when the collector re-samples, so it is
     # rendered once per sample and composited onto many background frames.
@@ -271,7 +292,7 @@ def display_frames(info: PanelInfo, paths: list[Path], overlay: bool, layout: st
     scrimmed: Image.Image | None = None
     scrimmed_for: object = None
 
-    for bg in background_images(paths, info, fps, image_interval, fit, loop):
+    for bg in background_images(paths, info, fps, image_interval, fit, loop, rotation):
         stats = collector.read()
         if stats is not layer_for:
             layer = render.LAYOUTS.get(layout, render.render_gauges)(
@@ -286,6 +307,8 @@ def display_frames(info: PanelInfo, paths: list[Path], overlay: bool, layout: st
         frame = scrimmed.copy()
         frame.paste(shadow, (0, 0), shadow)
         frame.paste(layer, (0, 0), layer)
+        if rotation:
+            frame = render.rotate_cw(frame, rotation)
         yield render.encode_rgb565(frame) if info.is_spi \
             else render.encode(frame, info.max_frame_kb)
 
@@ -377,7 +400,12 @@ def _portal_screencast_node() -> int:
     return int(result["node"])
 
 
-def mirror_frames(info: PanelInfo, fps: int, fit: str) -> Iterator[bytes]:
+# gst videoflip's clockwise/counterclockwise match rotate_cw's convention;
+# 180 has its own dedicated method.
+_GST_FLIP = {90: "clockwise", 180: "rotate-180", 270: "counterclockwise"}
+
+
+def mirror_frames(info: PanelInfo, fps: int, fit: str, rotation: int = 0) -> Iterator[bytes]:
     """Mirror the desktop via PipeWire, encoding to panel-sized JPEG in GStreamer.
 
     Which monitor or window gets mirrored is chosen in the compositor's own
@@ -392,17 +420,20 @@ def mirror_frames(info: PanelInfo, fps: int, fit: str) -> Iterator[bytes]:
     node = _portal_screencast_node()
     log.info("mirroring PipeWire node %s", node)
 
-    w, h = info.width, info.height
+    w, h = render.logical_size(info.width, info.height, rotation)
     if fit == "contain":
         scale_caps = f"video/x-raw,width={w},height={h},pixel-aspect-ratio=1/1"
         scaler = f"videoscale add-borders=true ! {scale_caps}"
     else:
         scaler = f"videoscale add-borders=false ! video/x-raw,width={w},height={h}"
 
+    flip_method = _GST_FLIP.get(rotation % 360)
+    flip_stage = f"videoflip method={flip_method} ! " if flip_method else ""
+
     pipeline_desc = (
         f"pipewiresrc path={node} always-copy=true ! "
         f"videorate ! video/x-raw,framerate={fps}/1 ! "
-        f"videoconvert ! {scaler} ! "
+        f"videoconvert ! {scaler} ! {flip_stage}"
         f"jpegenc quality=80 ! "
         f"appsink name=sink emit-signals=true max-buffers=2 drop=true sync=false"
     )

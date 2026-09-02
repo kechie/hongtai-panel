@@ -26,13 +26,14 @@ from .cli import UDEV_PATH, cmd_install_udev  # noqa: E402
 from .config import (  # noqa: E402
     IMAGE_SUFFIXES, MODES, PREVIEW_PATH, VIDEO_SUFFIXES, Config, Theme, is_video,
 )
-from .render import Fonts, LAYOUTS, fit_image, hex_to_rgb, render  # noqa: E402
+from .render import Fonts, LAYOUTS, fit_image, hex_to_rgb, render, rotate_cw  # noqa: E402
 from .sysinfo import METRICS, Collector  # noqa: E402
 
 SERVICE = "hongtai-panel.service"
 METRIC_KEYS = list(METRICS)
 METRIC_LABELS = [METRICS[k][0] for k in METRIC_KEYS]
 FITS = ["cover", "contain", "stretch"]
+ROTATIONS = [0, 90, 180, 270]
 
 COLOR_FIELDS = [
     ("background", "Background"),
@@ -234,6 +235,14 @@ class Window(Gtk.ApplicationWindow):
         page.append(fit_row)
         self._scaling_widgets = [fit_row]
 
+        self.rotation_dd = dropdown(
+            [f"{r}°" for r in ROTATIONS],
+            ROTATIONS.index(cfg.rotation) if cfg.rotation in ROTATIONS else ROTATIONS.index(180),
+        )
+        self.rotation_dd.connect("notify::selected", lambda *_: self._touch())
+        page.append(row("Rotation", self.rotation_dd,
+                        "Clockwise rotation to correct for how the panel is physically mounted"))
+
         page.append(section("Background"))
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -415,6 +424,7 @@ class Window(Gtk.ApplicationWindow):
         cfg.sample_interval = round(self.sample.get_value(), 1)
         cfg.brightness = int(self.brightness.get_value())
         cfg.fit = FITS[self.fit_dd.get_selected()]
+        cfg.rotation = ROTATIONS[self.rotation_dd.get_selected()]
         cfg.image_interval = float(self.interval.get_value())
         cfg.loop = self.loop.get_active()
 
@@ -568,6 +578,8 @@ class Window(Gtk.ApplicationWindow):
             background = self._preview_background(cfg)
             img = render(self.collector.read(), (480, 480), self.fonts, cfg.theme,
                          cfg.layout, background=background)
+            if cfg.rotation:
+                img = rotate_cw(img, cfg.rotation)
             self._show_pil(img)
             self.preview_note.set_text(
                 "Live preview of your current settings. Press Apply to send it to the panel."

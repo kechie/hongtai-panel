@@ -122,6 +122,12 @@ class Config:
     preview: bool = True
     theme: Theme = field(default_factory=Theme)
 
+    # Clockwise degrees to rotate the output before it is sent to the panel,
+    # to correct for how the panel is physically mounted. Defaults to 180
+    # because these panels ship designed for a cooler pump-head mount; a
+    # chassis mount is typically flipped relative to that.
+    rotation: int = 180
+
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "Config":
         if not path.exists():

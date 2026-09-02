@@ -9,18 +9,20 @@ just sits blank. This project drives it.
 
 <!-- Also sold under other brand names; the panel identifies itself as HONGTAI.
      Searchable terms: LovingCool AIO LCD Linux, HONGTAI MONITOR 33c3:7791,
-     TXW818-ST7701S, AIO cooler screen Linux driver. -->
+     33c3:7792, TXW818-ST7701S, AIO cooler screen Linux driver. -->
 
 | | |
 | --- | --- |
 | Hardware | LovingCool AIO cooler LCD (pump-head screen) |
-| USB ID | `33c3:7791` — reports as `HONGTAI MONITOR` |
-| Confirmed model | `TXW818-ST7701S-4.0inch`, 480×480, firmware 3.1 |
+| USB ID | `33c3:7791` or `33c3:7792` — reports as `HONGTAI MONITOR` |
+| Confirmed models | `TXW818-ST7701S-4.0inch` (480×480) and `TXW818-ST7701S-5.5inch-hor` (960×480), both firmware 3.1 |
 | Replaces | LOVINGCOOL MONITOR (Windows only) |
 
-Check yours with `lsusb | grep 33c3:7791`. Other panels in the same family
-should work too — the software asks the device for its own geometry, frame
-budget, and pixel format rather than assuming.
+Check yours with `lsusb | grep 33c3:`. Matching is by vendor ID only (`33c3`),
+not product ID, since the same panel family ships under more than one PID —
+other panels in the same family should work too, as the software asks the
+device for its own geometry, frame budget, and pixel format rather than
+assuming.
 
 What you get: a live CPU/GPU/RAM dashboard, wallpapers and video/GIF playlists,
 the dashboard drawn *over* those backgrounds, or a mirror of any monitor or
@@ -46,6 +48,16 @@ The script checks dependencies, installs the package, adds the udev rule, adds
 the app-menu entry, and enables the autostart service. Pass `--no-service` to
 skip autostart. Re-running upgrades in place and leaves your config alone.
 **Replug the panel afterwards** so the udev rule takes effect.
+
+The package normally installs with `pip install --user`. On distros that mark
+the system Python as externally managed (Arch/CachyOS, Debian 12+, and
+others — PEP 668), `pip` refuses that outright, so the script installs with
+`pipx` instead if it's available (`--system-site-packages`, so it can still
+see GTK4/PyGObject and GStreamer, which come from your distro's packages, not
+pip). Either way the binary ends up on your `PATH` at `~/.local/bin`, which is
+where the systemd service and app-menu entry expect it. If you're running the
+project from inside an activated virtualenv, the script detects that too and
+installs into it instead.
 
 ### System dependencies
 
@@ -116,7 +128,15 @@ hongtai-panel play a.png clip.mp4 b.jpg --interval 30   # mixed playlist
 hongtai-panel mirror                      # mirror a monitor or window
 hongtai-panel brightness 60
 hongtai-panel clear
+hongtai-panel --rotation 90 monitor       # correct for how the panel is mounted
 ```
+
+`--rotation` (0/90/180/270, clockwise) goes before the subcommand and applies to
+`run`, `monitor`, `play`, and `mirror`. It defaults to the `rotation` setting in
+the config (180 out of the box), which assumes the panel ends up upside-down
+relative to its native orientation — true for these panels mounted in a
+chassis rather than on the cooler pump head they were designed for. Set it to
+`0` if your mount doesn't need correcting.
 
 `play` takes images, videos, GIFs, directories, or any mix, and plays them in
 the order given. Stills are held for `--interval` seconds; clips play to their
@@ -302,6 +322,10 @@ in every theme dropdown in the GUI automatically.
 | Host | Bazzite 44, KDE Plasma on Wayland, i5-13400F + NVIDIA |
 | Verified | `info`, stats dashboard (both layouts), media playlists, stats-over-background, 23.6 fps sustained at 25 requested |
 | Unverified | `mirror`; RGB565 output (no SPI panel to hand); AMD/Intel GPU readings (parsing tested against a synthetic sysfs tree, not real hardware) |
+
+Also confirmed working: `33c3:7792` / `TXW818-ST7701S-5.5inch-hor` (960×480,
+firmware 3.1), chassis-mounted rather than on a pump head, on CachyOS —
+`info` and the stats dashboard, with `rotation` at the 180° default.
 
 ## Hardware support
 

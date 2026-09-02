@@ -1,4 +1,5 @@
-"""Wire protocol for HONGTAI / LOVINGCOOL USB serial LCD panels (33c3:7791).
+"""Wire protocol for HONGTAI / LOVINGCOOL USB serial LCD panels (VID 0x33C3;
+PID varies by model, e.g. 7791, 7792).
 
 Reverse-engineered from the Windows Electron app "LOVINGCOOL MONITOR"
 (main/_baseClass/device.js). The panel enumerates as USB CDC-ACM, so the
@@ -47,7 +48,6 @@ CHUNK_SIZE = 20 * 1024
 BAUD = 2_000_000  # Ignored by CDC-ACM, but matches the vendor app.
 
 USB_VID = 0x33C3
-USB_PID = 0x7791
 
 
 class Opcode:
@@ -98,10 +98,16 @@ def image_frame(jpeg: bytes) -> bytes:
 
 
 def parse_reply(raw: bytes) -> dict:
-    """Decode a control reply. Payload sits between the 5-byte head and 2-byte checksum."""
-    if len(raw) < 8:
+    """Decode a control reply. Payload sits between the 5-byte head and 2-byte checksum.
+
+    `raw` may hold trailing bytes from a frame that arrived right behind this
+    one (e.g. a spontaneous keepalive echo), so the payload is bounded by the
+    frame's own length field rather than by len(raw).
+    """
+    if len(raw) < 8 or raw[:2] != MAGIC:
         raise PanelError(f"short reply ({len(raw)} bytes): {raw.hex()}")
-    payload = raw[5:-2]
+    frame_len = int.from_bytes(raw[2:4], "little")
+    payload = raw[5:frame_len - 2]
     try:
         return {"status": 200, **json.loads(payload.decode("utf8"))}
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -342,7 +348,7 @@ def find_panel() -> str | None:
     from serial.tools import list_ports
 
     for p in list_ports.comports():
-        if p.vid == USB_VID and p.pid == USB_PID:
+        if p.vid == USB_VID:
             return p.device
     for p in list_ports.comports():
         if "MONITOR" in (p.product or "").upper() or "HONGTAI" in (p.manufacturer or "").upper():

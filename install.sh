@@ -53,8 +53,30 @@ python3 -c "import gi; gi.require_version('Gst','1.0')" 2>/dev/null && ok "GStre
 # -- package -----------------------------------------------------------------
 
 say "Installing the package"
-pip install --user --upgrade . >/dev/null
-BIN="$(python3 -c 'import site,os;print(os.path.join(site.USER_BASE,"bin"))')"
+if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    pip install --upgrade . >/dev/null
+    BIN="$(python3 -c 'import sys,os;print(os.path.join(sys.prefix,"bin"))')"
+elif command -v pipx >/dev/null 2>&1; then
+    # Distros like Arch/CachyOS mark the system Python as externally managed
+    # (PEP 668), so pip refuses even --user installs there. pipx gives an
+    # isolated env while still symlinking the entry point into ~/.local/bin,
+    # which is where the systemd service and desktop entry expect it.
+    # --system-site-packages lets that env still see PyGObject/GTK4, which is
+    # a system package (via pacman/apt) rather than something pip can build.
+    pipx install --force --system-site-packages . >/dev/null
+    BIN="$(pipx environment --value PIPX_BIN_DIR)"
+else
+    if ! pip_out=$(pip install --user --upgrade . 2>&1); then
+        if grep -q externally-managed-environment <<<"$pip_out"; then
+            warn "system Python is externally managed; retrying with --break-system-packages"
+            pip install --user --upgrade --break-system-packages . >/dev/null
+        else
+            echo "$pip_out" >&2
+            exit 1
+        fi
+    fi
+    BIN="$(python3 -c 'import site,os;print(os.path.join(site.USER_BASE,"bin"))')"
+fi
 ok "installed to $BIN/hongtai-panel"
 
 case ":$PATH:" in

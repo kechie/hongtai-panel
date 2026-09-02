@@ -296,6 +296,20 @@ def apply_scrim(img: Image.Image, amount: float, auto_contrast: bool = False) ->
     return ImageEnhance.Brightness(img).enhance(factor)
 
 
+_CW_TRANSPOSE = {90: Image.ROTATE_270, 180: Image.ROTATE_180, 270: Image.ROTATE_90}
+
+
+def rotate_cw(img: Image.Image, degrees: int) -> Image.Image:
+    """Rotate clockwise by 0/90/180/270 degrees, to correct for panel mounting."""
+    op = _CW_TRANSPOSE.get(degrees % 360)
+    return img.transpose(op) if op is not None else img
+
+
+def logical_size(width: int, height: int, rotation: int) -> tuple[int, int]:
+    """Canvas size to render at before `rotate_cw(rotation)` reaches (width, height)."""
+    return (height, width) if rotation % 360 in (90, 270) else (width, height)
+
+
 def fit_image(img: Image.Image, size: tuple[int, int], mode: str = "cover") -> Image.Image:
     """Resize to the panel, either cropping to fill or letterboxing."""
     target_w, target_h = size

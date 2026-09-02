@@ -35,7 +35,7 @@ def open_panel(args) -> Panel:
     port = args.port or find_panel()
     if not port:
         raise SystemExit(
-            "No panel found. Check `lsusb | grep 33c3:7791` and that /dev/ttyACM* exists.\n"
+            "No panel found. Check `lsusb | grep 33c3:` and that /dev/ttyACM* exists.\n"
             "If the device is present but unreadable, run: hongtai-panel install-udev"
         )
     try:
@@ -104,6 +104,8 @@ def stream(panel: Panel, frames: Iterator[bytes], brightness: int | None,
 
 
 def cmd_info(args) -> int:
+    cfg = Config.load()
+    rotation = args.rotation if args.rotation is not None else cfg.rotation
     panel = open_panel(args)
     i = panel.info
     print(f"port          {panel.port_path}")
@@ -111,7 +113,8 @@ def cmd_info(args) -> int:
     print(f"firmware      {i.version or 'unknown'}")
     print(f"model         {i.model or 'unknown'}")
     print(f"uid           {i.uid or 'unknown'}")
-    print(f"rotation      {i.angle}deg")
+    print(f"device angle  {i.angle}deg (reported by the panel itself)")
+    print(f"rotation      {rotation}deg clockwise (configured; --rotation to override)")
     print(f"pixel format  {'RGB565 (SPI)' if i.is_spi else 'JPEG'}")
     print(f"frame budget  {i.max_frame_kb} KB @ {i.frame_rate} fps")
     if i.raw:
@@ -122,11 +125,12 @@ def cmd_info(args) -> int:
 
 def cmd_monitor(args) -> int:
     cfg = Config.load()
+    rotation = args.rotation if args.rotation is not None else cfg.rotation
     panel = open_panel(args)
     fps = args.fps or min(panel.info.frame_rate, 15)  # dashboards need no more
     log.info("layout=%s at %d fps", args.theme, fps)
     stream(panel, sources.sysmon_frames(panel.info, args.theme, fps, cfg.theme,
-                                        args.sample_interval or cfg.sample_interval),
+                                        args.sample_interval or cfg.sample_interval, rotation),
            args.brightness, preview=cfg.preview)
     panel.close()
     return 0
@@ -152,6 +156,7 @@ def expand_media(raw_paths: list[str]) -> list[Path]:
 def cmd_play(args) -> int:
     """Display images, videos, GIFs, or any mix — optionally with stats on top."""
     cfg = Config.load()
+    rotation = args.rotation if args.rotation is not None else cfg.rotation
     paths = expand_media(args.path)
     panel = open_panel(args)
     fps = args.fps or panel.info.frame_rate
@@ -163,6 +168,7 @@ def cmd_play(args) -> int:
         sources.display_frames(
             panel.info, paths, args.overlay, args.theme or cfg.layout, fps, theme,
             cfg.sample_interval, args.interval, args.fit, not args.no_loop, args.quality,
+            rotation,
         ),
         args.brightness,
         preview=cfg.preview,
@@ -172,10 +178,12 @@ def cmd_play(args) -> int:
 
 
 def cmd_mirror(args) -> int:
+    cfg = Config.load()
+    rotation = args.rotation if args.rotation is not None else cfg.rotation
     panel = open_panel(args)
     fps = args.fps or panel.info.frame_rate
     log.info("requesting screen-share permission from the compositor")
-    stream(panel, sources.mirror_frames(panel.info, fps, args.fit), args.brightness)
+    stream(panel, sources.mirror_frames(panel.info, fps, args.fit, rotation), args.brightness)
     panel.close()
     return 0
 
@@ -188,9 +196,10 @@ def cmd_run(args) -> int:
     panel = open_panel(args)
     info = panel.info
     brightness = args.brightness if args.brightness is not None else cfg.brightness
+    rotation = args.rotation if args.rotation is not None else cfg.rotation
 
     if cfg.mode == "mirror":
-        frames = sources.mirror_frames(info, cfg.fps, cfg.fit)
+        frames = sources.mirror_frames(info, cfg.fps, cfg.fit, rotation)
         log.info("mode=mirror fps=%d", cfg.fps)
     elif cfg.mode == "display":
         paths = [Path(p) for p in cfg.media_paths if Path(p).exists()]
@@ -203,7 +212,7 @@ def cmd_run(args) -> int:
             )
         frames = sources.display_frames(
             info, paths, cfg.overlay, cfg.layout, cfg.fps, cfg.theme,
-            cfg.sample_interval, cfg.image_interval, cfg.fit, cfg.loop,
+            cfg.sample_interval, cfg.image_interval, cfg.fit, cfg.loop, rotation=rotation,
         )
         log.info("mode=display background=%s overlay=%s layout=%s fps=%d sample=%.1fs",
                  f"{len(paths)} file(s)" if paths else "none",
@@ -239,7 +248,7 @@ def cmd_clear(args) -> int:
 
 UDEV_RULE = (
     '# HONGTAI / LOVINGCOOL USB serial LCD panel\n'
-    'SUBSYSTEM=="tty", ATTRS{idVendor}=="33c3", ATTRS{idProduct}=="7791", '
+    'SUBSYSTEM=="tty", ATTRS{idVendor}=="33c3", '
     'MODE="0660", GROUP="dialout", TAG+="uaccess", SYMLINK+="hongtai-panel"\n'
 )
 UDEV_PATH = Path("/etc/udev/rules.d/99-hongtai-panel.rules")
@@ -300,12 +309,14 @@ def cmd_install_udev(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="hongtai-panel",
-        description="Drive HONGTAI/LOVINGCOOL USB serial LCD panels (33c3:7791) on Linux.",
+        description="Drive HONGTAI/LOVINGCOOL USB serial LCD panels (USB VID 33c3) on Linux.",
     )
     p.add_argument("--port", help="serial device (default: autodetect by USB id)")
     p.add_argument("--brightness", type=int, metavar="0-100", help="set brightness on start")
     p.add_argument("--max-kb", type=int, default=0,
                    help="override the per-frame JPEG budget (lower this if frames tear)")
+    p.add_argument("--rotation", type=int, choices=[0, 90, 180, 270], default=None,
+                   help="clockwise degrees to correct for panel mounting (default: from config)")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="command", required=True)
 
