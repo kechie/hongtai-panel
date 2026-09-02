@@ -360,3 +360,8 @@ If frames tear or the panel wedges, lower the size budget with `--max-kb`. The
 vendor caps one known-problematic combination (`TXW818-ST7701S-4.0inch` on
 firmware 3.1, when the encrypted `region.json` marks it a LovinCool device) at
 30 KB and 25 fps rather than the usual 80 KB and 30 fps.
+
+## kechie patches
+
+specific for jungle leopard display ac 01 chassis display hence the 180 degree rotation.
+device id from lsusb is 33c3:7792. hardcoded much like  `GOG1071`'s device id. I have no other devices to test this on.
