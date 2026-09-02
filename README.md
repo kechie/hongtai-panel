@@ -380,3 +380,7 @@ pixel format  JPEG
 frame budget  80 KB @ 30 fps
 raw           {'uid': '8965810B2B10', 'width': 960, 'height': 480, 'diplay_on': True, 'brightness': 80, 'i_blocks': 4096, 'i_block_size': 2048, 'i_block_free': 65135, 'i_path': '', 'model': 'TXW818-ST7701S-5.5inch-hor', 'version': '3.1', 'shape': '0BB1', 'region': '', 'angle': 0}
 ```
+
+## app running in jungle leopard ac02 display
+
+![Jungle Leopard AC02 Display](https://amian.tech/hongtai-panel.jpeg)
