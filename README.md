@@ -363,5 +363,20 @@ firmware 3.1, when the encrypted `region.json` marks it a LovinCool device) at
 
 ## kechie patches
 
-specific for jungle leopard display ac 01 chassis display hence the 180 degree rotation.
+specific for jungle leopard display ac 02 chassis display hence the 180 degree rotation by default.
 device id from lsusb is 33c3:7792. hardcoded much like  `GOG1071`'s device id. I have no other devices to test this on.
+
+```
+hongtai-panel info
+00:00:00 INFO    connected: /dev/ttyACM0  960x480  fw=3.1  model=TXW818-ST7701S-5.5inch-hor  JPEG<=80KB
+port          /dev/ttyACM0
+resolution    960x480
+firmware      3.1
+model         TXW818-ST7701S-5.5inch-hor
+uid           8965810B2B10
+device angle  0deg (reported by the panel itself)
+rotation      180deg clockwise (configured; --rotation to override)
+pixel format  JPEG
+frame budget  80 KB @ 30 fps
+raw           {'uid': '8965810B2B10', 'width': 960, 'height': 480, 'diplay_on': True, 'brightness': 80, 'i_blocks': 4096, 'i_block_size': 2048, 'i_block_free': 65135, 'i_path': '', 'model': 'TXW818-ST7701S-5.5inch-hor', 'version': '3.1', 'shape': '0BB1', 'region': '', 'angle': 0}
+```
