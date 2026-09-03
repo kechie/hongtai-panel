@@ -249,9 +249,14 @@ def cmd_clear(args) -> int:
 UDEV_RULE = (
     '# HONGTAI / LOVINGCOOL USB serial LCD panel\n'
     'SUBSYSTEM=="tty", ATTRS{idVendor}=="33c3", '
-    'MODE="0660", GROUP="dialout", TAG+="uaccess", SYMLINK+="hongtai-panel"\n'
+    'MODE="0660", TAG+="uaccess", SYMLINK+="hongtai-panel"\n'
 )
-UDEV_PATH = Path("/etc/udev/rules.d/99-hongtai-panel.rules")
+# Must sort before /usr/lib/udev/rules.d/73-seat-late.rules: that rule is
+# what actually runs the uaccess builtin, and it only does so for tags
+# already present on the device, so a 99-numbered file adds TAG+="uaccess"
+# too late for logind to ever grant the ACL.
+UDEV_PATH = Path("/etc/udev/rules.d/71-hongtai-panel.rules")
+UDEV_PATH_STALE = Path("/etc/udev/rules.d/99-hongtai-panel.rules")
 
 
 def root_prefix() -> list[str]:
@@ -286,9 +291,10 @@ def cmd_install_udev(args) -> int:
 
     script = (
         "set -e\n"
+        f"rm -f {UDEV_PATH_STALE}\n"
         f"cat > {UDEV_PATH} <<'EOF'\n{UDEV_RULE}EOF\n"
         "udevadm control --reload-rules\n"
-        "udevadm trigger --subsystem-match=tty\n"
+        "udevadm trigger --subsystem-match=tty --action=add\n"
     )
     print(f"Writing {UDEV_PATH} (needs root; you may be prompted for your password)")
     result = subprocess.run(root_prefix() + ["/bin/sh", "-c", script])

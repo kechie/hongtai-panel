@@ -1,4 +1,0 @@
-# HONGTAI / LOVINGCOOL USB serial LCD panel (AIO cooler display)
-# TAG+="uaccess" hands the device to whoever is logged in at the seat, so no
-# group membership or re-login is needed.
-SUBSYSTEM=="tty", ATTRS{idVendor}=="33c3", MODE="0660", GROUP="dialout", TAG+="uaccess", SYMLINK+="hongtai-panel"

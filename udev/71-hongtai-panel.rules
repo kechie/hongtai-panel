@@ -1,0 +1,7 @@
+# HONGTAI / LOVINGCOOL USB serial LCD panel (AIO cooler display)
+# TAG+="uaccess" hands the device to whoever is logged in at the seat, so no
+# group membership or re-login is needed. No GROUP= fallback: a literal
+# group name that doesn't exist on the system (e.g. no "dialout" group)
+# fails to resolve at rule-parse time, which drops this whole rule line
+# rather than just that one assignment.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="33c3", MODE="0660", TAG+="uaccess", SYMLINK+="hongtai-panel"
