@@ -1,14 +1,18 @@
-"""Frame sources: system monitor, video/GIF playback, and desktop mirroring.
+"""Frame sources: system monitor, video/GIF playback, desktop mirroring, and
+the music visualizer.
 
 Every source is an iterator of JPEG-encoded bytes already sized for the panel.
 """
 
 from __future__ import annotations
 
+import array
 import logging
 import queue
+import re
 import shutil
 import subprocess
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -473,3 +477,155 @@ def mirror_frames(info: PanelInfo, fps: int, fit: str, rotation: int = 0) -> Ite
                 yield frame
     finally:
         pipeline.set_state(Gst.State.NULL)
+
+
+# -- music visualizer ---------------------------------------------------
+
+# "@DEFAULT_MONITOR@" is PulseAudio's magic device name for the monitor of
+# the default sink, i.e. whatever is currently playing — resolved the same
+# way under PipeWire's pulse-compatible server. There is deliberately no
+# device flag: like mirror_frames' compositor picker, this always follows
+# whatever the desktop is doing right now.
+_SPECTRUM_MAGNITUDE_RE = re.compile(r"magnitude=\(float\)\{([^}]*)\}")
+
+
+class _SpectrumTap:
+    """Runs an FFT over desktop audio on a background thread.
+
+    `levels` is reassigned wholesale on every spectrum message rather than
+    mutated in place, so the render loop can read it without a lock (the same
+    trick _NvidiaPoller in sysinfo.py uses) and is always seeing a complete,
+    consistent set of bands.
+    """
+
+    def __init__(self, bands: int = 32, floor_db: int = -70):
+        self.bands = bands
+        self.floor_db = floor_db
+        self.levels = [0.0] * bands
+        threading.Thread(target=self._loop, daemon=True, name="music-spectrum").start()
+
+    def _loop(self) -> None:
+        try:
+            import gi
+
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
+
+            Gst.init(None)
+            pipeline = Gst.parse_launch(
+                "pulsesrc device=@DEFAULT_MONITOR@ ! audioconvert ! audioresample ! "
+                "audio/x-raw,rate=44100,channels=2 ! "
+                f"spectrum bands={self.bands} threshold={self.floor_db} "
+                "post-messages=true interval=33000000 ! fakesink sync=false"
+            )
+            bus = pipeline.get_bus()
+            pipeline.set_state(Gst.State.PLAYING)
+        except Exception:
+            log.exception("could not start audio capture for the spectrum visualizer")
+            return
+
+        try:
+            while True:
+                msg = bus.timed_pop_filtered(Gst.CLOCK_TIME_NONE, Gst.MessageType.ELEMENT)
+                s = msg.get_structure() if msg else None
+                if s is None or s.get_name() != "spectrum":
+                    continue
+                m = _SPECTRUM_MAGNITUDE_RE.search(s.to_string())
+                if m:
+                    floor = self.floor_db
+                    self.levels = [
+                        max(0.0, min(100.0, (float(v) - floor) / -floor * 100))
+                        for v in m.group(1).split(",")
+                    ]
+        finally:
+            pipeline.set_state(Gst.State.NULL)
+
+
+class _WaveformTap:
+    """Keeps a rolling window of raw waveform samples from desktop audio.
+
+    Like _SpectrumTap, `samples` is reassigned wholesale so the render loop
+    can read it lock-free.
+    """
+
+    def __init__(self, window: int = 480, rate: int = 22050):
+        self.window = window
+        self.samples = [0.0] * window
+        threading.Thread(target=self._loop, args=(rate,), daemon=True,
+                         name="music-scope").start()
+
+    def _loop(self, rate: int) -> None:
+        try:
+            import gi
+
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
+
+            Gst.init(None)
+            # drop=false: dropping a buffer here would splice two
+            # non-contiguous chunks of audio together, which reads as a burst
+            # of noise rather than a smooth trace. Backpressure (a blocked
+            # upstream) is the better failure mode for a waveform.
+            pipeline = Gst.parse_launch(
+                "pulsesrc device=@DEFAULT_MONITOR@ ! audioconvert ! audioresample ! "
+                f"audio/x-raw,format=F32LE,rate={rate},channels=1 ! "
+                "appsink name=sink emit-signals=false max-buffers=8 drop=false sync=false"
+            )
+            sink = pipeline.get_by_name("sink")
+            pipeline.set_state(Gst.State.PLAYING)
+        except Exception:
+            log.exception("could not start audio capture for the scope visualizer")
+            return
+
+        try:
+            while True:
+                sample = sink.emit("try-pull-sample", Gst.CLOCK_TIME_NONE)
+                if sample is None:
+                    continue
+                buf = sample.get_buffer()
+                ok, mapinfo = buf.map(Gst.MapFlags.READ)
+                if not ok:
+                    continue
+                try:
+                    data = array.array("f")
+                    data.frombytes(bytes(mapinfo.data))
+                finally:
+                    buf.unmap(mapinfo)
+                if data:
+                    self.samples = (self.samples + list(data))[-self.window:]
+        finally:
+            pipeline.set_state(Gst.State.NULL)
+
+
+def music_frames(info: PanelInfo, style: str, fps: int = 30, theme=None,
+                 rotation: int = 0) -> Iterator[bytes]:
+    """Render a live desktop-audio visualizer: spectrum bars or an oscilloscope.
+
+    Audio capture and analysis run on a background thread (GStreamer's
+    `spectrum` element does the FFT for bars; scope just reads raw samples),
+    decoupled from the render loop the same way Collector decouples telemetry
+    sampling from frame rate. If capture fails to start — no PulseAudio/
+    PipeWire server, missing GStreamer plugins — the visualizer stays blank
+    rather than taking the panel down.
+    """
+    from .config import Theme
+
+    theme = theme or Theme()
+    size = render.logical_size(info.width, info.height, rotation)
+    spi = info.is_spi
+    interval = 1.0 / max(1, fps)
+
+    if style == "scope":
+        tap = _WaveformTap()
+        draw = lambda: render.render_scope(tap.samples, size, theme)  # noqa: E731
+    else:
+        tap = _SpectrumTap()
+        draw = lambda: render.render_bars(tap.levels, size, theme)  # noqa: E731
+
+    while True:
+        started = time.monotonic()
+        img = draw()
+        if rotation:
+            img = render.rotate_cw(img, rotation)
+        yield render.encode_rgb565(img) if spi else render.encode(img, info.max_frame_kb)
+        time.sleep(max(0.0, interval - (time.monotonic() - started)))

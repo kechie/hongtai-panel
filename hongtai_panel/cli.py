@@ -188,6 +188,19 @@ def cmd_mirror(args) -> int:
     return 0
 
 
+def cmd_music(args) -> int:
+    cfg = Config.load()
+    rotation = args.rotation if args.rotation is not None else cfg.rotation
+    style = args.style or cfg.visualizer
+    panel = open_panel(args)
+    fps = args.fps or min(panel.info.frame_rate, 30)
+    log.info("visualizer=%s at %d fps", style, fps)
+    stream(panel, sources.music_frames(panel.info, style, fps, cfg.theme, rotation),
+           args.brightness, preview=cfg.preview)
+    panel.close()
+    return 0
+
+
 def cmd_run(args) -> int:
     """Drive the panel from the saved config. This is what the service runs."""
     cfg = Config.load()
@@ -201,6 +214,9 @@ def cmd_run(args) -> int:
     if cfg.mode == "mirror":
         frames = sources.mirror_frames(info, cfg.fps, cfg.fit, rotation)
         log.info("mode=mirror fps=%d", cfg.fps)
+    elif cfg.mode == "music":
+        frames = sources.music_frames(info, cfg.visualizer, cfg.fps, cfg.theme, rotation)
+        log.info("mode=music visualizer=%s fps=%d", cfg.visualizer, cfg.fps)
     elif cfg.mode == "display":
         paths = [Path(p) for p in cfg.media_paths if Path(p).exists()]
         missing = len(cfg.media_paths) - len(paths)
@@ -366,6 +382,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fps", type=int, help="frame rate (default: panel maximum)")
     s.add_argument("--fit", choices=["cover", "contain", "stretch"], default="cover")
     s.set_defaults(func=cmd_mirror)
+
+    s = sub.add_parser("music", help="show a live desktop-audio visualizer")
+    s.add_argument("--style", choices=sorted(sources.render.VISUALIZERS), default=None,
+                   help="bars (spectrum) or scope (waveform); default: from config")
+    s.add_argument("--fps", type=int, help="frame rate (default: 30)")
+    s.set_defaults(func=cmd_music)
 
     s = sub.add_parser("brightness", help="set backlight level and exit")
     s.add_argument("level", type=int, metavar="0-100")

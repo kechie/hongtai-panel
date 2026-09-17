@@ -25,8 +25,10 @@ device for its own geometry, frame budget, and pixel format rather than
 assuming.
 
 What you get: a live CPU/GPU/RAM dashboard, wallpapers and video/GIF playlists,
-the dashboard drawn *over* those backgrounds, or a mirror of any monitor or
-window — with a GTK4 control panel and a systemd service that starts it at login.
+the dashboard drawn *over* those backgrounds, a mirror of any monitor or
+window, or a live music visualizer (spectrum bars or an oscilloscope) driven
+by whatever the desktop is playing — with a GTK4 control panel and a systemd
+service that starts it at login.
 
 ## Why there is no kernel driver here
 
@@ -70,6 +72,7 @@ install script reports what it finds.
 | Video and GIF backgrounds | `ffmpeg` |
 | The GUI | GTK4 + PyGObject |
 | Screen mirroring | GStreamer with the PipeWire plugin |
+| Music visualizer | GStreamer with `gst-plugins-good` (for `spectrum`) and a PulseAudio-compatible server (PipeWire's `pipewire-pulse` counts) |
 
 ```bash
 # Fedora / Bazzite / RHEL
@@ -126,13 +129,15 @@ hongtai-panel play ~/Videos/loop.mp4      # video or animated GIF
 hongtai-panel play ~/Pictures/            # everything in a folder, in order
 hongtai-panel play a.png clip.mp4 b.jpg --interval 30   # mixed playlist
 hongtai-panel mirror                      # mirror a monitor or window
+hongtai-panel music                       # visualize desktop audio (bars, by default)
+hongtai-panel music --style scope         # oscilloscope instead of spectrum bars
 hongtai-panel brightness 60
 hongtai-panel clear
 hongtai-panel --rotation 90 monitor       # correct for how the panel is mounted
 ```
 
 `--rotation` (0/90/180/270, clockwise) goes before the subcommand and applies to
-`run`, `monitor`, `play`, and `mirror`. It defaults to the `rotation` setting in
+`run`, `monitor`, `play`, `mirror`, and `music`. It defaults to the `rotation` setting in
 the config (180 out of the box), which assumes the panel ends up upside-down
 relative to its native orientation — true for these panels mounted in a
 chassis rather than on the cooler pump head they were designed for. Set it to
@@ -153,6 +158,11 @@ hongtai-panel play ~/Videos/loop.mp4 --overlay --theme compact --scrim 0.6
 `mirror` opens your compositor's normal screen-share picker, so you choose the
 monitor or single window there. It works on Wayland and X11 through
 xdg-desktop-portal.
+
+`music` always follows whatever the desktop is currently playing (the default
+sink's monitor) — there is no device flag, the same way `mirror` has no region
+flag. `--style bars` (the default) is a spectrum analyzer; `--style scope` is
+an oscilloscope trace of the raw waveform.
 
 ## Run it at login
 
@@ -175,8 +185,8 @@ the GUI, the CLI's `run` command, and the service. It is written atomically, so
 a reader never sees a half-written file. Editing it by hand is fine; restart the
 service afterwards.
 
-Two modes: `display` and `mirror`. `display` covers everything the panel can
-show locally, as two independent switches:
+Three modes: `display`, `mirror`, and `music`. `display` covers everything the
+panel can show locally, as two independent switches:
 
 | `media_paths` | `overlay` | Result |
 | --- | --- | --- |
@@ -184,6 +194,9 @@ show locally, as two independent switches:
 | set | off | Wallpaper or video playlist |
 | set | on | Stats drawn over the playlist |
 | empty | off | Nothing — rejected at startup |
+
+`music` has its own single switch, `visualizer`: `bars` (the default) or
+`scope`.
 
 Configs from earlier versions are migrated on load, in two folds: the separate
 `image` and `video` modes became one `media` playlist, and `monitor` + `media`
@@ -307,7 +320,7 @@ port with the frame writer and interleaving corrupts both streams.
 | `hongtai_panel/config.py` | config + theme dataclasses, atomic load/save |
 | `hongtai_panel/sysinfo.py` | telemetry and the metric registry themes draw from |
 | `hongtai_panel/render.py` | theme-driven layouts, fit + JPEG encoding |
-| `hongtai_panel/sources.py` | frame sources: monitor, images, video, mirror |
+| `hongtai_panel/sources.py` | frame sources: monitor, images, video, mirror, music |
 | `hongtai_panel/cli.py` | argument parsing and the frame pump |
 | `hongtai_panel/gui.py` | GTK4 control panel |
 
@@ -321,7 +334,7 @@ in every theme dropdown in the GUI automatically.
 | Panel | `TXW818-ST7701S-4.0inch`, firmware 3.1, 480×480, uid `XXXXXXXXXXXX` |
 | Host | Bazzite 44, KDE Plasma on Wayland, i5-13400F + NVIDIA |
 | Verified | `info`, stats dashboard (both layouts), media playlists, stats-over-background, 23.6 fps sustained at 25 requested |
-| Unverified | `mirror`; RGB565 output (no SPI panel to hand); AMD/Intel GPU readings (parsing tested against a synthetic sysfs tree, not real hardware) |
+| Unverified | `mirror`; `music` (verified against a synthetic panel and live desktop audio, not real panel hardware); RGB565 output (no SPI panel to hand); AMD/Intel GPU readings (parsing tested against a synthetic sysfs tree, not real hardware) |
 
 Also confirmed working: `33c3:7792` / `TXW818-ST7701S-5.5inch-hor` (960×480,
 firmware 3.1), chassis-mounted rather than on a pump head, on CachyOS —

@@ -15,8 +15,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Desktop mirroring additionally needs PyGObject plus the GStreamer PipeWire
-# plugin, which are distro packages rather than wheels on most systems.
+# Desktop mirroring and the music visualizer both drive GStreamer through
+# PyGObject: mirroring needs the PipeWire plugin, music needs gst-plugins-good
+# (spectrum) and a PulseAudio-compatible server. All are distro packages
+# rather than wheels on most systems.
 mirror = ["PyGObject>=3.42"]
 
 [project.scripts]

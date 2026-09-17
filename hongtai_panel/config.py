@@ -20,7 +20,7 @@ PREVIEW_PATH = RUNTIME_DIR / "preview.jpg"
 
 # "display" covers stats, media, and stats-over-media; the background playlist
 # and the stats overlay are independent switches rather than separate modes.
-MODES = ("display", "mirror")
+MODES = ("display", "mirror", "music")
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".avif"}
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".gif", ".m4v", ".apng"}
@@ -121,6 +121,10 @@ class Config:
 
     preview: bool = True
     theme: Theme = field(default_factory=Theme)
+
+    # Which visualizer draws desktop audio in "music" mode. "bars" is the
+    # starting/default style; "scope" traces the raw waveform instead.
+    visualizer: str = "bars"
 
     # Clockwise degrees to rotate the output before it is sent to the panel,
     # to correct for how the panel is physically mounted. Defaults to 180

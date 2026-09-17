@@ -26,7 +26,7 @@ from .cli import UDEV_PATH, cmd_install_udev  # noqa: E402
 from .config import (  # noqa: E402
     IMAGE_SUFFIXES, MODES, PREVIEW_PATH, VIDEO_SUFFIXES, Config, Theme, is_video,
 )
-from .render import Fonts, LAYOUTS, fit_image, hex_to_rgb, render, rotate_cw  # noqa: E402
+from .render import Fonts, LAYOUTS, VISUALIZERS, fit_image, hex_to_rgb, render, rotate_cw  # noqa: E402
 from .sysinfo import METRICS, Collector  # noqa: E402
 
 SERVICE = "hongtai-panel.service"
@@ -181,11 +181,21 @@ class Window(Gtk.ApplicationWindow):
 
         cfg = self.config
         self.mode_dd = dropdown(
-            ["Panel display", "Mirror a screen"],
+            ["Panel display", "Mirror a screen", "Music visualizer"],
             MODES.index(cfg.mode) if cfg.mode in MODES else 0,
         )
         self.mode_dd.connect("notify::selected", lambda *_: self._refresh_mode_sensitivity())
         page.append(row("Mode", self.mode_dd))
+
+        self.visualizer_dd = dropdown(
+            [k.title() for k in VISUALIZERS],
+            list(VISUALIZERS).index(cfg.visualizer) if cfg.visualizer in VISUALIZERS else 0,
+        )
+        self.visualizer_dd.connect("notify::selected", lambda *_: self._touch())
+        visualizer_row = row("Visualizer", self.visualizer_dd,
+                             "Bars: a spectrum analyzer. Scope: a waveform trace.")
+        page.append(visualizer_row)
+        self._music_widgets = [visualizer_row]
 
         self.overlay = Gtk.CheckButton(label="Show system stats")
         self.overlay.set_active(cfg.overlay)
@@ -411,13 +421,16 @@ class Window(Gtk.ApplicationWindow):
         for w in getattr(self, "_media_widgets", []):
             w.set_sensitive(display)
         for w in getattr(self, "_scaling_widgets", []):
-            w.set_sensitive(True)
+            w.set_sensitive(mode != "music")
+        for w in getattr(self, "_music_widgets", []):
+            w.set_sensitive(mode == "music")
         self._touch()
 
     def collect(self) -> Config:
         """Read every widget back into a Config."""
         cfg = self.config
         cfg.mode = MODES[self.mode_dd.get_selected()]
+        cfg.visualizer = list(VISUALIZERS)[self.visualizer_dd.get_selected()]
         cfg.overlay = self.overlay.get_active()
         cfg.layout = list(LAYOUTS)[self.layout_dd.get_selected()]
         cfg.fps = int(self.fps.get_value())

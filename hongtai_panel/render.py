@@ -217,6 +217,53 @@ LAYOUTS = {
 THEMES = LAYOUTS
 
 
+def render_bars(bands: list[float], size: tuple[int, int], theme: Theme,
+                transparent: bool = False) -> Image.Image:
+    """A vertical spectrum-bar visualizer. `bands` are levels in 0..100."""
+    w, h = size
+    pal = Palette(theme)
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0)) if transparent \
+        else Image.new("RGB", (w, h), pal.bg)
+    if not bands:
+        return img
+    d = ImageDraw.Draw(img)
+    n = len(bands)
+    gap = max(1, w // (n * 8))
+    bar_w = (w - gap * (n - 1)) / n
+    for i, level in enumerate(bands):
+        level = max(0.0, min(100.0, level))
+        bar_h = h * level / 100
+        x0 = i * (bar_w + gap)
+        x1 = x0 + bar_w
+        d.rectangle((x0, h - bar_h, x1, h), fill=pal.load(level))
+    return img
+
+
+def render_scope(samples: list[float], size: tuple[int, int], theme: Theme,
+                 transparent: bool = False) -> Image.Image:
+    """An oscilloscope trace of the raw waveform. `samples` are in -1..1."""
+    w, h = size
+    pal = Palette(theme)
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0)) if transparent \
+        else Image.new("RGB", (w, h), pal.bg)
+    if len(samples) < 2:
+        return img
+    d = ImageDraw.Draw(img)
+    mid = h / 2
+    points = [
+        (i * w / (len(samples) - 1), mid - max(-1.0, min(1.0, s)) * mid * 0.9)
+        for i, s in enumerate(samples)
+    ]
+    d.line(points, fill=pal.cool, width=max(1, round(h / 160)), joint="curve")
+    return img
+
+
+VISUALIZERS = {
+    "bars": render_bars,
+    "scope": render_scope,
+}
+
+
 def shadow_for(layer: Image.Image, radius: int = 5, opacity: float = 0.85) -> Image.Image:
     """A soft dark halo matching the layer's shape.
 
