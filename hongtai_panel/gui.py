@@ -580,6 +580,7 @@ class Window(Gtk.ApplicationWindow):
                          cfg.layout, background=background)
             if cfg.rotation:
                 img = rotate_cw(img, cfg.rotation)
+            img = rotate_cw(img, 180)
             self._show_pil(img)
             self.preview_note.set_text(
                 "Live preview of your current settings. Press Apply to send it to the panel."
@@ -593,7 +594,10 @@ class Window(Gtk.ApplicationWindow):
             if mtime != self._preview_mtime:
                 self._preview_mtime = mtime
                 try:
-                    self.picture.set_filename(str(PREVIEW_PATH))
+                    from PIL import Image as PILImage
+
+                    with PILImage.open(PREVIEW_PATH) as im:
+                        self._show_pil(rotate_cw(im, 180))
                 except Exception:
                     pass
             age = time.time() - mtime
