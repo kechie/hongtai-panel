@@ -385,7 +385,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("music", help="show a live desktop-audio visualizer")
     s.add_argument("--style", choices=sorted(sources.render.VISUALIZERS), default=None,
-                   help="bars (spectrum) or scope (waveform); default: from config")
+                   help="visualizer style (bars, peaks, mirror, radial, geyser, matrix, "
+                        "scope); default: from config")
     s.add_argument("--fps", type=int, help="frame rate (default: 30)")
     s.set_defaults(func=cmd_music)
 

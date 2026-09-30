@@ -131,6 +131,7 @@ hongtai-panel play a.png clip.mp4 b.jpg --interval 30   # mixed playlist
 hongtai-panel mirror                      # mirror a monitor or window
 hongtai-panel music                       # visualize desktop audio (bars, by default)
 hongtai-panel music --style scope         # oscilloscope instead of spectrum bars
+hongtai-panel music --style geyser        # also: peaks, mirror, radial, matrix
 hongtai-panel brightness 60
 hongtai-panel clear
 hongtai-panel --rotation 90 monitor       # correct for how the panel is mounted
@@ -195,8 +196,8 @@ panel can show locally, as two independent switches:
 | set | on | Stats drawn over the playlist |
 | empty | off | Nothing — rejected at startup |
 
-`music` has its own single switch, `visualizer`: `bars` (the default) or
-`scope`.
+`music` has its own single switch, `visualizer`: `bars` (the default),
+`peaks`, `mirror`, `radial`, `geyser`, `matrix` or `scope`.
 
 Configs from earlier versions are migrated on load, in two folds: the separate
 `image` and `video` modes became one `media` playlist, and `monitor` + `media`

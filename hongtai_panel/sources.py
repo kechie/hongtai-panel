@@ -599,7 +599,7 @@ class _WaveformTap:
 
 def music_frames(info: PanelInfo, style: str, fps: int = 30, theme=None,
                  rotation: int = 0) -> Iterator[bytes]:
-    """Render a live desktop-audio visualizer: spectrum bars or an oscilloscope.
+    """Render a live desktop-audio visualizer: spectrum bars (and variants) or an oscilloscope.
 
     Audio capture and analysis run on a background thread (GStreamer's
     `spectrum` element does the FFT for bars; scope just reads raw samples),
@@ -615,12 +615,14 @@ def music_frames(info: PanelInfo, style: str, fps: int = 30, theme=None,
     spi = info.is_spi
     interval = 1.0 / max(1, fps)
 
-    if style == "scope":
+    factory = render.VISUALIZERS.get(style, render.VISUALIZERS["bars"])
+    viz = factory()
+    if style in render.WAVEFORM_VISUALIZERS:
         tap = _WaveformTap()
-        draw = lambda: render.render_scope(tap.samples, size, theme)  # noqa: E731
+        draw = lambda: viz.draw(tap.samples, size, theme)  # noqa: E731
     else:
         tap = _SpectrumTap()
-        draw = lambda: render.render_bars(tap.levels, size, theme)  # noqa: E731
+        draw = lambda: viz.draw(tap.levels, size, theme)  # noqa: E731
 
     while True:
         started = time.monotonic()

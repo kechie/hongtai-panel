@@ -258,10 +258,223 @@ def render_scope(samples: list[float], size: tuple[int, int], theme: Theme,
     return img
 
 
+# -- stateful spectrum visualizers -------------------------------------
+#
+# These keep per-instance state (falling peaks, particles, rain columns) and
+# are fed the latest spectrum levels (0..100) once per frame.
+
+def _canvas(size: tuple[int, int], pal: Palette, transparent: bool) -> Image.Image:
+    w, h = size
+    return Image.new("RGBA", (w, h), (0, 0, 0, 0)) if transparent \
+        else Image.new("RGB", (w, h), pal.bg)
+
+
+def _clamp01(v: float) -> float:
+    return max(0.0, min(1.0, v))
+
+
+class Peaks:
+    """Spectrum bars with slowly falling peak caps."""
+
+    def __init__(self):
+        self.caps: list[float] = []
+
+    def draw(self, bands, size, theme, transparent=False):
+        w, h = size
+        pal = Palette(theme)
+        img = _canvas(size, pal, transparent)
+        n = len(bands)
+        if not n:
+            return img
+        if len(self.caps) != n:
+            self.caps = [0.0] * n
+        d = ImageDraw.Draw(img)
+        gap = max(1, w // (n * 8))
+        bar_w = (w - gap * (n - 1)) / n
+        cap_h = max(2, h // 60)
+        for i, level in enumerate(bands):
+            level = max(0.0, min(100.0, level))
+            self.caps[i] = max(level, self.caps[i] - 1.2)
+            x0 = i * (bar_w + gap)
+            x1 = x0 + bar_w
+            d.rectangle((x0, h - h * level / 100, x1, h), fill=pal.load(level))
+            top = h - h * self.caps[i] / 100
+            d.rectangle((x0, top - cap_h, x1, top), fill=pal.fg)
+        return img
+
+
+class Mirror:
+    """Bars growing up and down from a centre line, low frequencies in the middle."""
+
+    def draw(self, bands, size, theme, transparent=False):
+        w, h = size
+        pal = Palette(theme)
+        img = _canvas(size, pal, transparent)
+        n = len(bands)
+        if not n:
+            return img
+        d = ImageDraw.Draw(img)
+        # Mirror left/right too so the shape is symmetric.
+        cols = list(reversed(bands)) + list(bands)
+        m = len(cols)
+        gap = max(1, w // (m * 8))
+        bar_w = (w - gap * (m - 1)) / m
+        mid = h / 2
+        for i, level in enumerate(cols):
+            level = max(0.0, min(100.0, level))
+            half = max(1.0, mid * level / 100)
+            x0 = i * (bar_w + gap)
+            d.rectangle((x0, mid - half, x0 + bar_w, mid + half), fill=pal.load(level))
+        return img
+
+
+class Radial:
+    """A ring of spokes whose length follows the spectrum."""
+
+    def draw(self, bands, size, theme, transparent=False):
+        import math
+
+        w, h = size
+        pal = Palette(theme)
+        img = _canvas(size, pal, transparent)
+        n = len(bands)
+        if not n:
+            return img
+        d = ImageDraw.Draw(img)
+        cx, cy = w / 2, h / 2
+        r0 = min(w, h) * 0.22
+        r_max = min(w, h) * 0.48 - r0
+        cols = list(bands) + list(reversed(bands))
+        m = len(cols)
+        width = max(2, int(2 * math.pi * r0 / m * 0.7))
+        for i, level in enumerate(cols):
+            level = max(0.0, min(100.0, level))
+            a = 2 * math.pi * i / m - math.pi / 2
+            r1 = r0 + r_max * level / 100
+            d.line((cx + math.cos(a) * r0, cy + math.sin(a) * r0,
+                    cx + math.cos(a) * r1, cy + math.sin(a) * r1),
+                   fill=pal.load(level), width=width)
+        d.ellipse((cx - r0, cy - r0, cx + r0, cy + r0), outline=pal.track,
+                  width=max(1, h // 200))
+        return img
+
+
+class Geyser:
+    """Particles fired upward from each band; louder bands spout higher."""
+
+    def __init__(self):
+        self.parts: list[list[float]] = []  # x, y, vx, vy, level
+        import random
+        self.rng = random.Random()
+
+    def draw(self, bands, size, theme, transparent=False):
+        w, h = size
+        pal = Palette(theme)
+        img = _canvas(size, pal, transparent)
+        n = len(bands)
+        if not n:
+            return img
+        rng = self.rng
+        colw = w / n
+        gravity = h * 0.0035
+        for i, level in enumerate(bands):
+            level = max(0.0, min(100.0, level))
+            if level < 4:
+                continue
+            for _ in range(1 + int(level / 35)):
+                speed = h * (0.02 + 0.045 * level / 100) * rng.uniform(0.75, 1.1)
+                self.parts.append([(i + rng.random()) * colw, float(h),
+                                   rng.uniform(-0.25, 0.25) * colw * 0.3,
+                                   -speed, level])
+        d = ImageDraw.Draw(img)
+        r = max(2, h // 90)
+        alive = []
+        for p in self.parts:
+            p[0] += p[2]
+            p[1] += p[3]
+            p[3] += gravity
+            if p[1] > h and p[3] > 0:
+                continue
+            alive.append(p)
+            # Colour by height reached: cool near the ground, hot at the peak.
+            d.ellipse((p[0] - r, p[1] - r, p[0] + r, p[1] + r),
+                      fill=pal.load(100 * (1 - p[1] / h) * 1.1))
+        self.parts = alive[-1500:]
+        return img
+
+
+class Matrix:
+    """Falling digital rain; each column's speed and brightness follow a band."""
+
+    def __init__(self):
+        import random
+        self.rng = random.Random()
+        self.cols: list[dict] = []
+        self.cell = 0
+        self.chars = "01234567890:;<>=+*#$%&@"
+
+    def draw(self, bands, size, theme, transparent=False):
+        w, h = size
+        pal = Palette(theme)
+        img = _canvas(size, pal, transparent)
+        n = len(bands)
+        if not n:
+            return img
+        fonts = getattr(self, "fonts", None)
+        if fonts is None:
+            fonts = self.fonts = Fonts()
+        cell = max(10, h // 20)
+        ncols = max(1, w // cell)
+        if len(self.cols) != ncols or self.cell != cell:
+            self.cell = cell
+            self.cols = [{"y": self.rng.uniform(-20, 0), "trail": self.rng.randint(6, 16)}
+                         for _ in range(ncols)]
+        font = fonts.at(int(cell * 0.9))
+        d = ImageDraw.Draw(img)
+        rows = h / cell
+        for c, col in enumerate(self.cols):
+            level = bands[min(n - 1, c * n // ncols)] / 100
+            col["y"] += 0.15 + level * 0.9
+            if col["y"] - col["trail"] > rows:
+                col["y"] = self.rng.uniform(-8, 0)
+                col["trail"] = self.rng.randint(6, 16)
+            head = int(col["y"])
+            for k in range(col["trail"]):
+                row = head - k
+                if row < 0 or row >= rows:
+                    continue
+                fade = 1 - k / col["trail"]
+                # Head of the trail is bright; the body fades toward the background.
+                base = pal.fg if k == 0 else pal.cool
+                colour = lerp(pal.bg, base, _clamp01(fade * (0.35 + level)))
+                ch = self.chars[self.rng.randrange(len(self.chars))]
+                d.text((c * cell, row * cell), ch, font=font, fill=colour)
+        return img
+
+
+class _Bars:
+    def draw(self, bands, size, theme, transparent=False):
+        return render_bars(bands, size, theme, transparent)
+
+
+class _Scope:
+    def draw(self, samples, size, theme, transparent=False):
+        return render_scope(samples, size, theme, transparent)
+
+
+# name -> factory for an object with draw(data, size, theme, transparent).
 VISUALIZERS = {
-    "bars": render_bars,
-    "scope": render_scope,
+    "bars": _Bars,
+    "peaks": Peaks,
+    "mirror": Mirror,
+    "radial": Radial,
+    "geyser": Geyser,
+    "matrix": Matrix,
+    "scope": _Scope,
 }
+
+# Which audio tap feeds each visualizer; anything not listed uses the spectrum.
+WAVEFORM_VISUALIZERS = {"scope"}
 
 
 def shadow_for(layer: Image.Image, radius: int = 5, opacity: float = 0.85) -> Image.Image:
