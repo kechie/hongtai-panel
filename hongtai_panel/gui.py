@@ -193,7 +193,7 @@ class Window(Gtk.ApplicationWindow):
         )
         self.visualizer_dd.connect("notify::selected", lambda *_: self._touch())
         visualizer_row = row("Visualizer", self.visualizer_dd,
-                             "Bars, Peaks, Mirror, Radial, Geyser and Matrix follow the spectrum; Scope traces the waveform.")
+                             "Bars, Peaks, Mirror, Radial, Geyser, Matrix, Flame and Heartbeat follow the spectrum; Scope traces the waveform.")
         page.append(visualizer_row)
         self._music_widgets = [visualizer_row]
 

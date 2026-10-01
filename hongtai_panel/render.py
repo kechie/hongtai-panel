@@ -452,6 +452,146 @@ class Matrix:
         return img
 
 
+class Flame:
+    """Classic fire: a low-res heat grid fed from the bottom by the spectrum.
+
+    Each band heats its slice of the bottom row; heat rises with sideways
+    jitter and cools as it goes, then is mapped through the theme colours
+    (background -> hot -> warm -> foreground) and upscaled.
+    """
+
+    GW, GH = 48, 36
+
+    def __init__(self):
+        import random
+        self.rng = random.Random()
+        self.heat = [[0.0] * self.GW for _ in range(self.GH)]
+        self.lut: list[tuple] | None = None
+        self.lut_key = None
+
+    def _palette(self, pal: Palette) -> list[tuple]:
+        key = (pal.bg, pal.hot, pal.warm, pal.fg)
+        if self.lut_key != key:
+            stops = [pal.bg, pal.hot, pal.warm, pal.fg]
+            self.lut = []
+            for i in range(256):
+                t = i / 255 * (len(stops) - 1)
+                k = min(int(t), len(stops) - 2)
+                self.lut.append(lerp(stops[k], stops[k + 1], t - k))
+            self.lut_key = key
+        return self.lut
+
+    def draw(self, bands, size, theme, transparent=False):
+        w, h = size
+        pal = Palette(theme)
+        n = len(bands)
+        gw, gh, rng = self.GW, self.GH, self.rng
+        heat = self.heat
+        bottom = heat[-1]
+        for x in range(gw):
+            level = bands[min(n - 1, x * n // gw)] / 100 if n else 0.0
+            bottom[x] = min(1.0, level * rng.uniform(0.85, 1.25))
+        # Sweep top-down so each row reads the not-yet-updated row below it.
+        for y in range(gh - 1):
+            below = heat[y + 1]
+            row = heat[y]
+            for x in range(gw):
+                src = min(gw - 1, max(0, x + rng.randint(-1, 1)))
+                v = (below[src] + below[x]) / 2 - rng.uniform(0.0, 0.07)
+                row[x] = v if v > 0 else 0.0
+        lut = self._palette(pal)
+        small = Image.new("RGB", (gw, gh))
+        small.putdata([lut[min(255, int(v * 255))] for row in heat for v in row])
+        img = small.resize((w, h), Image.BILINEAR)
+        if transparent:
+            # Fade the background out so only the flame remains.
+            img = img.convert("RGBA")
+            bg = pal.bg
+            img.putdata([(r, g, b, 0 if (r, g, b) == bg else 255) for r, g, b in
+                         img.convert("RGB").getdata()])
+        return img
+
+
+class Heartbeat:
+    """A scrolling ECG trace that pulses on bass hits and mid-range onsets.
+
+    The trace is a rolling buffer of samples (-1..1). Each frame it scrolls
+    left; when low-band energy jumps above its running average a full P-QRS-T
+    beat is queued, and when mid-band energy does the same a smaller, sharper
+    blip is queued. Pulses are summed, so a bass and a mid hit landing
+    together overlap instead of cancelling each other.
+    """
+
+    # One beat: small P wave, sharp Q-R-S spike, broad T wave.
+    BEAT = [0.0, 0.08, 0.15, 0.08, 0.0, 0.0, -0.12, 0.9, -0.35, 0.0, 0.0,
+            0.0, 0.1, 0.22, 0.28, 0.22, 0.1, 0.0]
+    # A mid-range onset: a short, narrow tick that dips then rises.
+    BLIP = [0.0, -0.15, 0.45, -0.2, 0.0, 0.08, 0.0]
+
+    def __init__(self, width: int = 160):
+        self.width = width
+        self.buf = [0.0] * width
+        self.queue: list[float] = []
+        self.avg = {"bass": 0.0, "mid": 0.0}
+        self.cool = {"bass": 0, "mid": 0}
+
+    def _onset(self, name: str, level: float, floor: float, ratio: float,
+               cooldown: int) -> bool:
+        """True when `level` jumps above its running average (a hit)."""
+        self.avg[name] += (level - self.avg[name]) * 0.08
+        self.cool[name] -= 1
+        if self.cool[name] <= 0 and level > floor and level > self.avg[name] * ratio:
+            self.cool[name] = cooldown
+            return True
+        return False
+
+    def _add(self, pulse: list[float], amp: float) -> None:
+        if len(self.queue) < len(pulse):
+            self.queue += [0.0] * (len(pulse) - len(self.queue))
+        for i, v in enumerate(pulse):
+            self.queue[i] += v * amp
+
+    def draw(self, bands, size, theme, transparent=False):
+        w, h = size
+        pal = Palette(theme)
+        img = _canvas(size, pal, transparent)
+        n = len(bands)
+        lo = max(1, n // 6)
+        hi = max(lo + 1, n // 2)
+        bass = sum(bands[:lo]) / lo if n else 0.0
+        mids = sum(bands[lo:hi]) / max(1, len(bands[lo:hi])) if n else 0.0
+        if self._onset("bass", bass, 25, 1.3, 8):
+            self._add(self.BEAT, 0.5 + 0.5 * _clamp01(bass / 100))
+        if self._onset("mid", mids, 20, 1.25, 4):
+            self._add(self.BLIP, 0.4 + 0.6 * _clamp01(mids / 100))
+        # Advance a few samples per frame; idle samples carry a little noise.
+        for _ in range(3):
+            v = self.queue.pop(0) if self.queue else 0.0
+            self.buf.append(v)
+        del self.buf[: -self.width]
+        d = ImageDraw.Draw(img)
+        mid = h * 0.55
+        scale = h * 0.4
+        m = len(self.buf)
+        pts = [(i * w / (m - 1), mid - v * scale) for i, v in enumerate(self.buf)]
+        # Grid lines for the monitor look.
+        step = max(8, h // 8)
+        for gy in range(0, h, step):
+            d.line((0, gy, w, gy), fill=pal.track, width=1)
+        # Older samples fade: draw the trace in segments from dim to bright.
+        segs = 6
+        per = max(1, (m - 1) // segs)
+        lw = max(2, round(h / 120))
+        for k in range(segs):
+            a, b = k * per, m if k == segs - 1 else (k + 1) * per + 1
+            colour = lerp(pal.bg, pal.cool, 0.25 + 0.75 * (k + 1) / segs)
+            d.line(pts[a:b], fill=colour, width=lw, joint="curve")
+        hx, hy = pts[-1]
+        r = lw * 2
+        d.ellipse((hx - r, hy - r, hx + r, hy + r), fill=pal.fg)
+        return img
+
+
 class _Bars:
     def draw(self, bands, size, theme, transparent=False):
         return render_bars(bands, size, theme, transparent)
@@ -470,6 +610,8 @@ VISUALIZERS = {
     "radial": Radial,
     "geyser": Geyser,
     "matrix": Matrix,
+    "flame": Flame,
+    "heartbeat": Heartbeat,
     "scope": _Scope,
 }
 
