@@ -618,7 +618,7 @@ def music_frames(info: PanelInfo, style: str, fps: int = 30, theme=None,
     factory = render.VISUALIZERS.get(style, render.VISUALIZERS["bars"])
     viz = factory()
     if style in render.WAVEFORM_VISUALIZERS:
-        tap = _WaveformTap()
+        tap = _WaveformTap(window=getattr(viz, "window", 480))
         draw = lambda: viz.draw(tap.samples, size, theme)  # noqa: E731
     else:
         tap = _SpectrumTap()

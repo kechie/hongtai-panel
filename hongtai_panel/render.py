@@ -304,27 +304,44 @@ class Peaks:
 
 
 class Mirror:
-    """Bars growing up and down from a centre line, low frequencies in the middle."""
+    """cliamp's "mirror": thin dot bars pulsing about a horizontal axis.
+
+    Bars span the middle 84% of the panel, one dot wide with one-dot gaps.
+    Their height follows the overall loudness, tapers toward the edges, and
+    wobbles on two slow sine waves so the shape keeps moving. The axis is
+    cool, bar bodies warm, and the outer quarter of each bar hot.
+    """
 
     def draw(self, bands, size, theme, transparent=False):
-        w, h = size
+        import math
+        import time
+
         pal = Palette(theme)
         img = _canvas(size, pal, transparent)
-        n = len(bands)
-        if not n:
+        grid = _dot_grid(size)
+        _, cols, rows, _, _ = grid
+        if cols < 4 or rows < 4:
             return img
-        d = ImageDraw.Draw(img)
-        # Mirror left/right too so the shape is symmetric.
-        cols = list(reversed(bands)) + list(bands)
-        m = len(cols)
-        gap = max(1, w // (m * 8))
-        bar_w = (w - gap * (m - 1)) / m
-        mid = h / 2
-        for i, level in enumerate(cols):
-            level = max(0.0, min(100.0, level))
-            half = max(1.0, mid * level / 100)
-            x0 = i * (bar_w + gap)
-            d.rectangle((x0, mid - half, x0 + bar_w, mid + half), fill=pal.load(level))
+        span = max(2, cols * 84 // 100)
+        span = min(cols, span - span % 2)
+        count = max(1, span // 2)
+        x0 = (cols - span) // 2
+        axis = rows // 2
+        max_r = min(axis, rows - 1 - axis)
+        dots = {(x, axis): 0 for x in range(x0, x0 + span)}
+        env = sum(_clamp01(b / 100) for b in bands) / len(bands) if bands else 0.0
+        t = time.monotonic()
+        half = (count - 1) / 2
+        for i in range(count):
+            dist = abs(i - half) / half if half > 0 else 0.0
+            wobble = 0.4 + 0.6 * abs(math.sin(t * 4.6 + i * 0.42)
+                                     * math.sin(t * 1.9 - i * 0.13))
+            amp = rows * 0.8 * (1 - dist * 0.55) * (0.3 + 0.7 * env) * (0.35 + 0.65 * wobble)
+            radius = min(max_r, max(1, round(amp)))
+            x = x0 + i * 2 + 1
+            for y in range(axis - radius, axis + radius + 1):
+                dots[(x, y)] = 2 if abs(y - axis) / radius >= 0.75 else 1
+        _paint_dots(img, dots, pal, grid)
         return img
 
 
@@ -592,6 +609,190 @@ class Heartbeat:
         return img
 
 
+def _dot_grid(size: tuple[int, int]) -> tuple[int, int, int, float, float]:
+    """A braille-style dot grid for the panel: (pitch, cols, rows, x_off, y_off)."""
+    w, h = size
+    pitch = max(4, h // 64)
+    cols, rows = w // pitch, h // pitch
+    return pitch, cols, rows, (w - cols * pitch + pitch) / 2, (h - rows * pitch + pitch) / 2
+
+
+def _draw_dots(img: Image.Image, dots, pal: Palette, grid) -> None:
+    """Draw (col, row) dots coloured by height band, as cliamp does: cool in
+    the bottom 30%, warm to 60%, hot above."""
+    rows = grid[2]
+
+    def band(row: int) -> int:
+        norm = 1 - row / rows
+        return 2 if norm >= 0.6 else 1 if norm >= 0.3 else 0
+
+    _paint_dots(img, {(c, r): band(r) for c, r in dots}, pal, grid)
+
+
+def _paint_dots(img: Image.Image, tiers: dict, pal: Palette, grid) -> None:
+    """Draw dots from a {(col, row): tier} map; tiers 0/1/2 are cool/warm/hot."""
+    pitch, _, _, x_off, y_off = grid
+    colours = (pal.cool, pal.warm, pal.hot)
+    r = max(1.0, pitch * 0.32)
+    d = ImageDraw.Draw(img)
+    for (col, row), tier in tiers.items():
+        cx, cy = x_off + col * pitch, y_off + row * pitch
+        d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=colours[tier])
+
+
+class Wave:
+    """cliamp's "wave": the raw waveform plotted on a braille-style dot grid.
+
+    Samples are downsampled to one dot row per dot column, and each column
+    also lights every dot back to the previous column's row so the trace is
+    continuous. `samples` are in -1..1.
+    """
+
+    def draw(self, samples, size, theme, transparent=False):
+        pal = Palette(theme)
+        img = _canvas(size, pal, transparent)
+        grid = _dot_grid(size)
+        _, cols, rows, _, _ = grid
+        n = len(samples)
+        if cols < 2 or rows < 2:
+            return img
+        dots = []
+        prev = None
+        for x in range(cols):
+            v = samples[min(n - 1, x * n // cols)] if n else 0.0
+            v = max(-1.0, min(1.0, v))
+            y = max(0, min(rows - 1, int((1 - v) * (rows - 1) / 2)))
+            prev = y if prev is None else prev
+            dots += [(x, row) for row in range(min(y, prev), max(y, prev) + 1)]
+            prev = y
+        _draw_dots(img, dots, pal, grid)
+        return img
+
+
+class Lissajous:
+    """cliamp's "scope": an XY oscilloscope drawn on the dot grid.
+
+    The audio is mono, so X is the signal and Y is a delayed copy of it. The
+    delay slowly wobbles over time, so pure tones trace circles and ellipses
+    while music ties itself into evolving knots. `samples` are in -1..1.
+    """
+
+    window = 2048  # wants a longer stretch of audio than the plain scope
+
+    def __init__(self):
+        self.frame = 0
+
+    def draw(self, samples, size, theme, transparent=False):
+        import math
+
+        pal = Palette(theme)
+        img = _canvas(size, pal, transparent)
+        grid = _dot_grid(size)
+        _, cols, rows, _, _ = grid
+        n = len(samples)
+        self.frame += 1
+        if n < 2 or cols < 2 or rows < 2:
+            return img
+        wobble = int(math.sin(self.frame * 0.02) * (n // 8))
+        delay = max(1, min(n - 1, n // 4 + wobble))
+        step = max(1, (n - delay) // 512)
+        dots = set()
+        prev = None
+        for i in range(0, n - delay, step):
+            x = max(-1.0, min(1.0, samples[i]))
+            y = max(-1.0, min(1.0, samples[i + delay]))
+            px = max(0, min(cols - 1, int((x + 1) / 2 * (cols - 1))))
+            py = max(0, min(rows - 1, int((1 - y) / 2 * (rows - 1))))
+            dots.add((px, py))
+            if prev is not None:
+                # Fill in short gaps so the figure reads as a continuous curve.
+                dx, dy = px - prev[0], py - prev[1]
+                steps = max(abs(dx), abs(dy))
+                if 0 < steps < 30:
+                    for k in range(1, steps):
+                        dots.add((prev[0] + dx * k // steps, prev[1] + dy * k // steps))
+            prev = (px, py)
+        _draw_dots(img, dots, pal, grid)
+        return img
+
+
+class Retro:
+    """cliamp's "retro": an 80s synthwave scene on the dot grid.
+
+    A striped setting sun sits above the horizon, the spectrum rides the
+    horizon as a smooth wave, and a perspective grid floor scrolls toward the
+    viewer. The grid is cool, the sun warm and the wave hot.
+    """
+
+    def draw(self, bands, size, theme, transparent=False):
+        import math
+        import time
+
+        pal = Palette(theme)
+        img = _canvas(size, pal, transparent)
+        grid = _dot_grid(size)
+        _, cols, rows, _, _ = grid
+        if cols < 4 or rows < 4:
+            return img
+        horizon = max(rows * 2 // 5, 2)
+        floor_rows = rows - horizon
+        cx = (cols - 1) / 2
+        dots: dict = {}
+
+        # Sun: a semicircle above the horizon, its lower half striped.
+        sun_r = horizon * 0.85
+        stripe = max(1, int(sun_r * 0.15))
+        for y in range(horizon):
+            above = horizon - y
+            if above > sun_r:
+                continue
+            if above < sun_r * 0.5 and (int(above) // stripe) % 2 == 1:
+                continue
+            half_w = math.sqrt(sun_r * sun_r - above * above)
+            for x in range(max(0, int(cx - half_w)), min(cols - 1, int(cx + half_w)) + 1):
+                dots[(x, y)] = 1
+
+        # Floor: horizon line, lines converging on the vanishing point, and
+        # horizontal lines that are dense near the horizon and scroll forward.
+        for x in range(cols):
+            dots[(x, horizon)] = 0
+        for i in range(19):
+            bottom_x = i * (cols - 1) / 18
+            for y in range(horizon + 1, rows):
+                t = (y - horizon) / max(1, floor_rows - 1)
+                x = round(cx + (bottom_x - cx) * t)
+                if 0 <= x < cols:
+                    dots[(x, y)] = 0
+        scroll = (time.monotonic() * 1.6) % 1.0
+        for i in range(10):
+            z = (i + scroll) / 10 % 1.0
+            y = horizon + 1 + int(z * z * max(1, floor_rows - 2))
+            if horizon < y < rows:
+                for x in range(cols):
+                    dots[(x, y)] = 0
+
+        # Wave: the spectrum, cosine-interpolated, rising from the horizon.
+        n = len(bands)
+        max_wave = horizon * 0.85
+        prev = None
+        for x in range(cols):
+            if n:
+                f = x / max(1, cols - 1) * (n - 1)
+                i = int(f)
+                mu = (1 - math.cos((f - i) * math.pi)) / 2
+                level = bands[i] if i >= n - 1 else bands[i] * (1 - mu) + bands[i + 1] * mu
+                level = _clamp01(level / 100)
+            else:
+                level = 0.0
+            y = max(0, min(rows - 1, horizon - int(max(0.03, level) * max_wave)))
+            prev = y if prev is None else prev
+            for yy in range(min(y, prev), max(y, prev) + 1):
+                dots[(x, yy)] = 2
+            prev = y
+        _paint_dots(img, dots, pal, grid)
+        return img
+
+
 class _Bars:
     def draw(self, bands, size, theme, transparent=False):
         return render_bars(bands, size, theme, transparent)
@@ -612,11 +813,14 @@ VISUALIZERS = {
     "matrix": Matrix,
     "flame": Flame,
     "heartbeat": Heartbeat,
+    "wave": Wave,
+    "lissajous": Lissajous,
+    "retro": Retro,
     "scope": _Scope,
 }
 
 # Which audio tap feeds each visualizer; anything not listed uses the spectrum.
-WAVEFORM_VISUALIZERS = {"scope"}
+WAVEFORM_VISUALIZERS = {"scope", "wave", "lissajous"}
 
 
 def shadow_for(layer: Image.Image, radius: int = 5, opacity: float = 0.85) -> Image.Image:
