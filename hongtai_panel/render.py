@@ -609,10 +609,14 @@ class Heartbeat:
         return img
 
 
-def _dot_grid(size: tuple[int, int]) -> tuple[int, int, int, float, float]:
-    """A braille-style dot grid for the panel: (pitch, cols, rows, x_off, y_off)."""
+def _dot_grid(size: tuple[int, int], divisions: int = 64) -> tuple[int, int, int, float, float]:
+    """A braille-style dot grid for the panel: (pitch, cols, rows, x_off, y_off).
+
+    `divisions` is roughly how many dots span the panel's height; more makes a
+    finer grid for visualizers that draw thin lines.
+    """
     w, h = size
-    pitch = max(4, h // 64)
+    pitch = max(4, h // divisions)
     cols, rows = w // pitch, h // pitch
     return pitch, cols, rows, (w - cols * pitch + pitch) / 2, (h - rows * pitch + pitch) / 2
 
@@ -629,10 +633,11 @@ def _draw_dots(img: Image.Image, dots, pal: Palette, grid) -> None:
     _paint_dots(img, {(c, r): band(r) for c, r in dots}, pal, grid)
 
 
-def _paint_dots(img: Image.Image, tiers: dict, pal: Palette, grid) -> None:
-    """Draw dots from a {(col, row): tier} map; tiers 0/1/2 are cool/warm/hot."""
+def _paint_dots(img: Image.Image, tiers: dict, pal: Palette, grid, colours=None) -> None:
+    """Draw dots from a {(col, row): tier} map. Tiers index `colours`, which
+    defaults to cool/warm/hot."""
     pitch, _, _, x_off, y_off = grid
-    colours = (pal.cool, pal.warm, pal.hot)
+    colours = colours or (pal.cool, pal.warm, pal.hot)
     r = max(1.0, pitch * 0.32)
     d = ImageDraw.Draw(img)
     for (col, row), tier in tiers.items():
@@ -793,6 +798,210 @@ class Retro:
         return img
 
 
+def _star_hash(i: int, slot: int) -> float:
+    """Deterministic pseudo-random value in [0, 1) for star `i`, one per slot.
+
+    splitmix64's finaliser: merely scaling i would put the stars on a few
+    diagonals a fixed step apart, so the index is avalanched instead.
+    """
+    mask = (1 << 64) - 1
+    x = (i * 0x9E3779B97F4A7C15 + (slot + 1) * 0xD1B54A32D192ED03) & mask
+    x ^= x >> 30
+    x = (x * 0xBF58476D1CE4E5B9) & mask
+    x ^= x >> 27
+    x = (x * 0x94D049BB133111EB) & mask
+    x ^= x >> 31
+    return (x >> 11) / (1 << 53)
+
+
+class RedSector:
+    """cliamp's "redsector": a wireframe equalizer after the Red Sector Inc.
+    RSI Megademo (Amiga, 1989).
+
+    Five hollow bars stand on a common ground line, each driven by two
+    spectrum groups, and the whole set tumbles as a rigid body in front of a
+    drifting starfield. Hidden edges are dropped by per-face backface culling,
+    so a bar shows its front, one flank and its cap.
+
+    Each bar tracks its own ceiling and floor and shows where the level sits
+    between them: every band rests at its own level and only moves a little
+    around it, so absolute heights would draw the shape of the mix, not the
+    beat. Bars are coloured by height (cool/warm/hot); stars are dimmed
+    versions of the same colours and always sit behind the bars.
+    """
+
+    BARS = 5
+    HALF_W = HALF_D = 0.26
+    PITCH = 0.78  # centre-to-centre distance between bars
+    GROUND_Y = -1.05
+    MIN_H, MAX_H = 0.40, 2.30
+    FOCAL, CAMERA_Z, ZOOM_AMP = 3.2, 6.0, 1.5
+    MAX_STRETCH, COMFORT_ROWS = 2.0, 40
+    # Radians per frame; the object tumbles about two axes at unrelated rates.
+    SPIN_Y, SPIN_X, ZOOM_RATE = 0.105, 0.073, 0.011
+    RELAX, MIN_ENVELOPE = 0.001, 0.06
+    DOTS_PER_STAR, MIN_STARS, MAX_STARS = 130, 6, 90
+    STAR_DIM = 0.6
+    # The motion constants are per frame at the original's ~20 fps; scale by
+    # elapsed time so the speed does not depend on the panel's frame rate.
+    REF_FPS = 20.0
+
+    CORNER_X = (-1, 1, 1, -1, -1, 1, 1, -1)
+    CORNER_Z = (-1, -1, -1, -1, 1, 1, 1, 1)
+    CORNER_TOP = (False, False, True, True, False, False, True, True)
+    # Wound so a face is visible when its normal points away from the viewer.
+    FACES = ((0, 1, 2, 3), (5, 4, 7, 6), (0, 3, 7, 4), (1, 5, 6, 2), (3, 2, 6, 7), (0, 4, 5, 1))
+
+    def __init__(self):
+        self.ceiling = [0.0] * self.BARS
+        self.floor = [1.0] * self.BARS  # start wide open; the first frames close in
+        self.heights = [self.MIN_H] * self.BARS
+        self.frame = 0.0
+        self.last: float | None = None
+
+    @staticmethod
+    def _groups(bands, count: int = 10) -> list[float]:
+        """Fold the spectrum into `count` log-spaced groups, as 0..1 levels.
+
+        The FFT bands are linear in frequency, so an even split would give
+        the bass a single narrow group; a geometric split matches what the
+        original's ten bands cover.
+        """
+        n = len(bands)
+        if not n:
+            return [0.0] * count
+        out, start = [], 0
+        for k in range(1, count + 1):
+            end = n if k == count else min(n, max(start + 1, round(n ** (k / count))))
+            out.append(_clamp01(max(bands[start:end] or [0.0]) / 100))
+            start = min(end, n - 1)
+        return out
+
+    def _advance(self, bands, k: float) -> None:
+        levels = self._groups(bands)
+        for i in range(self.BARS):
+            # The louder of the pair: averaging would let a silent band halve
+            # its partner, and the top band is empty on most material.
+            level = max(levels[i * 2], levels[i * 2 + 1])
+            if level > self.ceiling[i]:
+                self.ceiling[i] = level
+            else:
+                self.ceiling[i] -= self.RELAX * k
+            if level < self.floor[i]:
+                self.floor[i] = level
+            else:
+                self.floor[i] += self.RELAX * k
+            if self.ceiling[i] < self.floor[i] + self.MIN_ENVELOPE:
+                self.ceiling[i] = self.floor[i] + self.MIN_ENVELOPE
+            norm = _clamp01((level - self.floor[i]) / (self.ceiling[i] - self.floor[i]))
+            target = self.MIN_H + norm * (self.MAX_H - self.MIN_H)
+            # Rise fast, fall slow, so a transient reads as a hit not a flicker.
+            rate = 0.75 if target > self.heights[i] else 0.28
+            self.heights[i] += (target - self.heights[i]) * (1 - (1 - rate) ** k)
+
+    def _place(self, x, y, z, cx, sx, cy, sy, cam_z):
+        """Rotate about Y then X and project: (rx, ry, rz, px, py)."""
+        x1 = x * cy + z * sy
+        z1 = -x * sy + z * cy
+        y1 = y * cx - z1 * sx
+        z2 = y * sx + z1 * cx
+        f = self.FOCAL / max(0.35, z2 + cam_z)
+        return x1, y1, z2, x1 * f, y1 * f
+
+    def _fit(self, rows, cols, cx, sx, cy, sy, cam_z):
+        """Scale against a hull the object can never exceed, not the live
+        shape, which would blow a quiet picture up and look motionless."""
+        import math
+
+        hull_x = (self.BARS - 1) / 2 * self.PITCH + self.HALF_W
+        pts = [self._place(a * hull_x, y, b * self.HALF_D, cx, sx, cy, sy, cam_z)
+               for a in (-1, 1) for y in (self.GROUND_Y, self.GROUND_Y + self.MAX_H)
+               for b in (-1, 1)]
+        xs, ys = [p[3] for p in pts], [p[4] for p in pts]
+        span_x = max(max(xs) - min(xs), 0.001)
+        span_y = max(max(ys) - min(ys), 0.001)
+        # Breathe in and out, as the demo pulls the object toward the viewer.
+        zoom = 0.55 + 0.30 * (0.5 + 0.5 * math.sin(self.frame * self.ZOOM_RATE))
+        fit_y = (rows - 1) / span_y * zoom
+        # A short panel starves the object of height, so widen to keep the bars apart.
+        stretch = min(self.MAX_STRETCH, max(1.0, self.COMFORT_ROWS / rows))
+        fit_x = min(fit_y * stretch, (cols - 1) / span_x)
+        return (fit_x, fit_y, cols / 2 - (min(xs) + max(xs)) / 2 * fit_x,
+                rows / 2 + (min(ys) + max(ys)) / 2 * fit_y)
+
+    @staticmethod
+    def _visible(p1, p2, p3, cam_z) -> bool:
+        ux, uy, uz = (p2[i] - p1[i] for i in range(3))
+        vx, vy, vz = (p3[i] - p2[i] for i in range(3))
+        nx, ny, nz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+        return nx * p1[0] + ny * p1[1] + nz * (p1[2] + cam_z) > 0
+
+    def draw(self, bands, size, theme, transparent=False):
+        import math
+        import time
+
+        pal = Palette(theme)
+        img = _canvas(size, pal, transparent)
+        grid = _dot_grid(size, 80)
+        _, cols, rows, _, _ = grid
+        if cols < 16 or rows < 4:
+            return img
+
+        now = time.monotonic()
+        k = min(4.0, (now - self.last) * self.REF_FPS) if self.last else 1.0
+        self.last = now
+        self.frame += k
+        self._advance(bands, k)
+
+        dots: dict = {}
+
+        def put(x: int, y: int, tag: int) -> None:
+            if 0 <= x < cols and 0 <= y < rows and tag > dots.get((x, y), -1):
+                dots[(x, y)] = tag
+
+        # Tags 0-3 are the stars, 4-6 the bars; a bar always wins a shared dot.
+        count = min(self.MAX_STARS, max(self.MIN_STARS, rows * cols // self.DOTS_PER_STAR))
+        for i in range(1, count + 1):
+            speed = 0.10 + (i % 3) * 0.09  # three speed lanes: a shallow sense of depth
+            x = (_star_hash(i, 0) * cols - self.frame * speed) % cols
+            put(int(x), int(_star_hash(i, 1) * rows), int(_star_hash(i, 2) * 4))
+
+        cy_, sy_ = math.cos(self.frame * self.SPIN_Y), math.sin(self.frame * self.SPIN_Y)
+        cx_, sx_ = math.cos(self.frame * self.SPIN_X), math.sin(self.frame * self.SPIN_X)
+        cam_z = self.CAMERA_Z + math.sin(self.frame * self.ZOOM_RATE) * self.ZOOM_AMP
+        fit_x, fit_y, ctr_x, ctr_y = self._fit(rows, cols, cx_, sx_, cy_, sy_, cam_z)
+
+        for bar in range(self.BARS):
+            base_x = (bar - (self.BARS - 1) / 2) * self.PITCH
+            top_y = self.GROUND_Y + self.heights[bar]
+            shown = (self.heights[bar] - self.MIN_H) / (self.MAX_H - self.MIN_H)
+            tag = 6 if shown >= 0.6 else 5 if shown >= 0.3 else 4
+            r3, p2 = [], []
+            for c in range(8):
+                y = top_y if self.CORNER_TOP[c] else self.GROUND_Y
+                rx, ry, rz, sx, sy = self._place(
+                    base_x + self.CORNER_X[c] * self.HALF_W, y, self.CORNER_Z[c] * self.HALF_D,
+                    cx_, sx_, cy_, sy_, cam_z)
+                r3.append((rx, ry, rz))
+                p2.append((ctr_x + sx * fit_x, ctr_y - sy * fit_y))
+            for face in self.FACES:
+                if not self._visible(r3[face[0]], r3[face[1]], r3[face[2]], cam_z):
+                    continue
+                for e in range(4):
+                    (x0, y0), (x1, y1) = p2[face[e]], p2[face[(e + 1) % 4]]
+                    steps = min(512, int(max(abs(x1 - x0), abs(y1 - y0))) + 1)
+                    for t in range(steps + 1):
+                        f = t / steps
+                        put(math.floor(x0 + (x1 - x0) * f + 0.5),
+                            math.floor(y0 + (y1 - y0) * f + 0.5), tag)
+
+        dim = lambda c: lerp(pal.bg, c, self.STAR_DIM)  # noqa: E731
+        colours = (pal.dim, dim(pal.cool), dim(pal.warm), dim(pal.hot),
+                   pal.cool, pal.warm, pal.hot)
+        _paint_dots(img, dots, pal, grid, colours)
+        return img
+
+
 class _Bars:
     def draw(self, bands, size, theme, transparent=False):
         return render_bars(bands, size, theme, transparent)
@@ -816,6 +1025,7 @@ VISUALIZERS = {
     "wave": Wave,
     "lissajous": Lissajous,
     "retro": Retro,
+    "redsector": RedSector,
     "scope": _Scope,
 }
 
