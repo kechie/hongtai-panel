@@ -87,8 +87,12 @@ esac
 # -- device access -----------------------------------------------------------
 
 say "Granting device access"
-RULE=/etc/udev/rules.d/99-hongtai-panel.rules
-if [[ -f "$RULE" ]]; then
+# Keep these in step with UDEV_PATH / UDEV_PATH_STALE in hongtai_panel/cli.py.
+# An old 99- rule is not "installed": it sorts after the uaccess handling, so
+# it never grants access. install-udev replaces it with the 71- one.
+RULE=/etc/udev/rules.d/71-hongtai-panel.rules
+STALE_RULE=/etc/udev/rules.d/99-hongtai-panel.rules
+if [[ -f "$RULE" && ! -f "$STALE_RULE" ]]; then
     ok "udev rule already installed"
 else
     "$BIN/hongtai-panel" install-udev || warn "could not install the udev rule; run it yourself later"
@@ -120,5 +124,7 @@ fi
 
 say "Done"
 echo "  Launch the GUI:   hongtai-panel gui"
-echo "  Check the panel:  hongtai-panel info"
+echo "  Service status:   systemctl --user status hongtai-panel"
+echo "  Check the panel:  systemctl --user stop hongtai-panel && hongtai-panel info"
+echo "                    (the service holds the port; stop it before using other commands)"
 echo "  Logs:             journalctl --user -u hongtai-panel -f"

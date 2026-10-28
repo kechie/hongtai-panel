@@ -199,7 +199,11 @@ class Panel:
 
     def __init__(self, port: str, timeout: float = 2.0):
         self.port_path = port
-        self._serial = serial.Serial(port, BAUD, timeout=timeout, write_timeout=5.0)
+        # exclusive: a second process (say `hongtai-panel info` while the
+        # service is streaming) would otherwise interleave writes with ours and
+        # blank the panel mid-frame. This makes it fail to open instead.
+        self._serial = serial.Serial(port, BAUD, timeout=timeout, write_timeout=5.0,
+                                     exclusive=True)
         self._lock = threading.Lock()
         self._keepalive: threading.Thread | None = None
         self._stop = threading.Event()

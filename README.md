@@ -117,7 +117,9 @@ still, the preview renders locally so theme edits show up instantly before you
 press Apply; for video backgrounds and mirroring it displays the frame the
 service last published, which is what is genuinely on the panel.
 
-Everything is also available from the command line:
+Everything is also available from the command line. The panel's serial port can
+only be opened by one program at a time, so if the autostart service is running,
+stop it first (`systemctl --user stop hongtai-panel`) and start it again after.
 
 ```bash
 hongtai-panel info                        # geometry, firmware, frame budget

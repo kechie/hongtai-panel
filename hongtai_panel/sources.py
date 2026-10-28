@@ -102,12 +102,20 @@ def media_frames(paths: list[Path], info: PanelInfo, fps: int, image_interval: f
 
     # Stills are decoded once up front; clips stream on demand.
     stills = {p: _encode_still(p, info, fit, rotation) for p in paths if not is_video(p)}
+    broken: set[Path] = set()
 
     while True:
         for path in paths:
+            if path in broken:
+                continue
             if is_video(path):
-                yield from video_frames(path, info, fps, fit, loop=False,
-                                        quality=quality, rotation=rotation)
+                got_frame = False
+                for frame in video_frames(path, info, fps, fit, loop=False,
+                                          quality=quality, rotation=rotation):
+                    got_frame = True
+                    yield frame
+                if not got_frame:
+                    _drop_broken_clip(path, paths, broken)
             else:
                 deadline = time.monotonic() + image_interval
                 while time.monotonic() < deadline:
@@ -115,6 +123,20 @@ def media_frames(paths: list[Path], info: PanelInfo, fps: int, image_interval: f
                     time.sleep(1.0)
         if not loop:
             return
+
+
+def _drop_broken_clip(path: Path, paths: list[Path], broken: set[Path]) -> None:
+    """Stop retrying a clip ffmpeg could not decode.
+
+    A clip that yields nothing returns immediately, so without this the
+    playlist loop would restart ffmpeg as fast as the process can fork. If
+    nothing playable is left, give up so the caller exits and the service
+    restarts on its own schedule, rather than spinning.
+    """
+    broken.add(path)
+    log.warning("skipping %s: ffmpeg produced no frames (unreadable or unsupported)", path)
+    if all(p in broken for p in paths):
+        raise RuntimeError("none of the playlist's clips could be decoded")
 
 
 def _split_mjpeg(stream, chunk_size: int = 65536) -> Iterator[bytes]:
@@ -211,6 +233,9 @@ def _video_raw_frames(path: Path, info: PanelInfo, fps: int, fit: str,
     rotated here — the caller composites onto these first and rotates the
     finished frame once, rather than rotating every background frame.
     """
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("ffmpeg not found")
+
     w, h = render.logical_size(info.width, info.height, rotation)
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
     if loop:
@@ -249,11 +274,19 @@ def background_images(paths: list[Path], info: PanelInfo, fps: int, image_interv
                 stills[p] = render.fit_image(im, size, fit)
 
     interval = 1.0 / max(1, fps)
+    broken: set[Path] = set()
     while True:
         for path in paths:
+            if path in broken:
+                continue
             if is_video(path):
                 single = len(paths) == 1
-                yield from _video_raw_frames(path, info, fps, fit, loop and single, rotation)
+                got_frame = False
+                for frame in _video_raw_frames(path, info, fps, fit, loop and single, rotation):
+                    got_frame = True
+                    yield frame
+                if not got_frame:
+                    _drop_broken_clip(path, paths, broken)
             else:
                 still = stills[path]
                 deadline = time.monotonic() + image_interval
@@ -484,117 +517,237 @@ def mirror_frames(info: PanelInfo, fps: int, fit: str, rotation: int = 0) -> Ite
 # "@DEFAULT_MONITOR@" is PulseAudio's magic device name for the monitor of
 # the default sink, i.e. whatever is currently playing — resolved the same
 # way under PipeWire's pulse-compatible server. There is deliberately no
-# device flag: like mirror_frames' compositor picker, this always follows
-# whatever the desktop is doing right now.
+# device flag: like mirror_frames' compositor picker, this follows whatever
+# the desktop is doing. The name is only resolved when the capture stream
+# starts, so _AudioTap restarts the pipeline when the default output changes.
+_AUDIO_SOURCE = "pulsesrc device=@DEFAULT_MONITOR@"
 _SPECTRUM_MAGNITUDE_RE = re.compile(r"magnitude=\(float\)\{([^}]*)\}")
 
 
-class _SpectrumTap:
-    """Runs an FFT over desktop audio on a background thread.
+def _default_sink() -> str | None:
+    """Name of the current default output, or None if it cannot be read.
 
-    `levels` is reassigned wholesale on every spectrum message rather than
-    mutated in place, so the render loop can read it without a lock (the same
-    trick _NvidiaPoller in sysinfo.py uses) and is always seeing a complete,
-    consistent set of bands.
+    Uses `pactl`, which PipeWire's pulse server ships too. Without it the tap
+    simply cannot notice an output change, and behaves as it did before.
     """
+    if not shutil.which("pactl"):
+        return None
+    try:
+        out = subprocess.run(["pactl", "get-default-sink"], capture_output=True,
+                             text=True, timeout=2).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out or None
+
+
+class _AudioTap:
+    """Runs a GStreamer capture pipeline on a background thread, and keeps it alive.
+
+    Subclasses supply the pipeline (`_pipeline`) and how to consume it
+    (`_pump`). This base restarts the pipeline when the audio server reports
+    an error or end-of-stream, and when the default output device changes, so
+    the visualizer does not freeze on stale data after a headphone swap or a
+    PipeWire restart. Start-up failures (no server, missing plugins) are logged
+    once and retried quietly with a growing delay.
+
+    Published data is reassigned wholesale rather than mutated, so the render
+    loop can read it without a lock (the same trick _NvidiaPoller in
+    sysinfo.py uses) and always sees a complete, consistent snapshot.
+    """
+
+    label = "audio"
+    SINK_POLL_SECONDS = 2.0
+    RETRY_MAX_SECONDS = 15.0
+
+    def __init__(self):
+        self._sink = None
+        self._sink_checked = 0.0
+        threading.Thread(target=self._supervise, daemon=True,
+                         name=f"music-{self.label}").start()
+
+    # -- subclass hooks -------------------------------------------------
+
+    def _pipeline(self) -> str:
+        raise NotImplementedError
+
+    def _pump(self, Gst, pipeline) -> None:
+        """Consume the running pipeline. Return when it needs restarting."""
+        raise NotImplementedError
+
+    def _reset(self) -> None:
+        """Blank the published data, so a dead capture does not look live."""
+
+    # -- machinery ------------------------------------------------------
+
+    def _output_changed(self) -> bool:
+        """True when the default output differs from the one we started on.
+
+        Rate-limited: it shells out, and callers check once per loop wakeup.
+        """
+        now = time.monotonic()
+        if now - self._sink_checked < self.SINK_POLL_SECONDS:
+            return False
+        self._sink_checked = now
+        current = _default_sink()
+        if current is None or self._sink is None:
+            self._sink = self._sink or current
+            return False
+        if current != self._sink:
+            log.info("default audio output changed to %s; restarting %s capture",
+                     current, self.label)
+            return True
+        return False
+
+    def _log_failure(self, Gst, msg) -> None:
+        if msg.type == Gst.MessageType.ERROR:
+            err, _debug = msg.parse_error()
+            log.warning("%s capture error: %s", self.label, err.message)
+        else:
+            log.warning("%s capture ended", self.label)
+
+    def _failed(self, Gst, bus) -> bool:
+        """True if the bus holds an error or end-of-stream message."""
+        msg = bus.pop_filtered(Gst.MessageType.ERROR | Gst.MessageType.EOS)
+        if msg is None:
+            return False
+        self._log_failure(Gst, msg)
+        return True
+
+    def _supervise(self) -> None:
+        delay = 1.0
+        reported = False
+        while True:
+            pipeline = None
+            try:
+                import gi
+
+                gi.require_version("Gst", "1.0")
+                from gi.repository import Gst
+
+                Gst.init(None)
+                pipeline = Gst.parse_launch(self._pipeline())
+                self._sink = _default_sink()
+                self._sink_checked = time.monotonic()
+                pipeline.set_state(Gst.State.PLAYING)
+                started = time.monotonic()
+                self._pump(Gst, pipeline)
+                # A pipeline that ran for a while was healthy; start the
+                # backoff over rather than punishing the next restart.
+                if time.monotonic() - started > 10:
+                    delay = 1.0
+                    reported = False
+            except Exception:
+                if not reported:
+                    log.exception("could not start audio capture for the %s visualizer",
+                                  self.label)
+                    reported = True
+            finally:
+                if pipeline is not None:
+                    pipeline.set_state(Gst.State.NULL)
+            self._reset()
+            time.sleep(delay)
+            delay = min(self.RETRY_MAX_SECONDS, delay * 2)
+
+
+class _SpectrumTap(_AudioTap):
+    """Runs an FFT over desktop audio; `levels` holds the latest bands (0..100)."""
+
+    label = "spectrum"
 
     def __init__(self, bands: int = 32, floor_db: int = -70):
         self.bands = bands
         self.floor_db = floor_db
         self.levels = [0.0] * bands
-        threading.Thread(target=self._loop, daemon=True, name="music-spectrum").start()
+        super().__init__()
 
-    def _loop(self) -> None:
-        try:
-            import gi
+    def _pipeline(self) -> str:
+        return (
+            f"{_AUDIO_SOURCE} ! audioconvert ! audioresample ! "
+            "audio/x-raw,rate=44100,channels=2 ! "
+            f"spectrum bands={self.bands} threshold={self.floor_db} "
+            "post-messages=true interval=33000000 ! fakesink sync=false"
+        )
 
-            gi.require_version("Gst", "1.0")
-            from gi.repository import Gst
+    def _reset(self) -> None:
+        self.levels = [0.0] * self.bands
 
-            Gst.init(None)
-            pipeline = Gst.parse_launch(
-                "pulsesrc device=@DEFAULT_MONITOR@ ! audioconvert ! audioresample ! "
-                "audio/x-raw,rate=44100,channels=2 ! "
-                f"spectrum bands={self.bands} threshold={self.floor_db} "
-                "post-messages=true interval=33000000 ! fakesink sync=false"
-            )
-            bus = pipeline.get_bus()
-            pipeline.set_state(Gst.State.PLAYING)
-        except Exception:
-            log.exception("could not start audio capture for the spectrum visualizer")
-            return
-
-        try:
-            while True:
-                msg = bus.timed_pop_filtered(Gst.CLOCK_TIME_NONE, Gst.MessageType.ELEMENT)
-                s = msg.get_structure() if msg else None
-                if s is None or s.get_name() != "spectrum":
-                    continue
-                m = _SPECTRUM_MAGNITUDE_RE.search(s.to_string())
-                if m:
-                    floor = self.floor_db
-                    self.levels = [
-                        max(0.0, min(100.0, (float(v) - floor) / -floor * 100))
-                        for v in m.group(1).split(",")
-                    ]
-        finally:
-            pipeline.set_state(Gst.State.NULL)
+    def _pump(self, Gst, pipeline) -> None:
+        bus = pipeline.get_bus()
+        kinds = Gst.MessageType.ELEMENT | Gst.MessageType.ERROR | Gst.MessageType.EOS
+        floor = self.floor_db
+        while True:
+            # Wake up periodically even when no audio is flowing, so an
+            # output change is noticed during silence too.
+            msg = bus.timed_pop_filtered(Gst.SECOND, kinds)
+            if msg is None:
+                if self._output_changed():
+                    return
+                continue
+            if msg.type != Gst.MessageType.ELEMENT:
+                self._log_failure(Gst, msg)
+                return
+            s = msg.get_structure()
+            if s is None or s.get_name() != "spectrum":
+                continue
+            m = _SPECTRUM_MAGNITUDE_RE.search(s.to_string())
+            if m:
+                self.levels = [
+                    max(0.0, min(100.0, (float(v) - floor) / -floor * 100))
+                    for v in m.group(1).split(",")
+                ]
+            if self._output_changed():
+                return
 
 
-class _WaveformTap:
-    """Keeps a rolling window of raw waveform samples from desktop audio.
+class _WaveformTap(_AudioTap):
+    """Keeps a rolling window of raw waveform samples from desktop audio."""
 
-    Like _SpectrumTap, `samples` is reassigned wholesale so the render loop
-    can read it lock-free.
-    """
+    label = "waveform"
 
     def __init__(self, window: int = 480, rate: int = 22050):
         self.window = window
+        self.rate = rate
         self.samples = [0.0] * window
-        threading.Thread(target=self._loop, args=(rate,), daemon=True,
-                         name="music-scope").start()
+        super().__init__()
 
-    def _loop(self, rate: int) -> None:
-        try:
-            import gi
+    def _pipeline(self) -> str:
+        # drop=false: dropping a buffer here would splice two non-contiguous
+        # chunks of audio together, which reads as a burst of noise rather
+        # than a smooth trace. Backpressure (a blocked upstream) is the better
+        # failure mode for a waveform.
+        return (
+            f"{_AUDIO_SOURCE} ! audioconvert ! audioresample ! "
+            f"audio/x-raw,format=F32LE,rate={self.rate},channels=1 ! "
+            "appsink name=sink emit-signals=false max-buffers=8 drop=false sync=false"
+        )
 
-            gi.require_version("Gst", "1.0")
-            from gi.repository import Gst
+    def _reset(self) -> None:
+        self.samples = [0.0] * self.window
 
-            Gst.init(None)
-            # drop=false: dropping a buffer here would splice two
-            # non-contiguous chunks of audio together, which reads as a burst
-            # of noise rather than a smooth trace. Backpressure (a blocked
-            # upstream) is the better failure mode for a waveform.
-            pipeline = Gst.parse_launch(
-                "pulsesrc device=@DEFAULT_MONITOR@ ! audioconvert ! audioresample ! "
-                f"audio/x-raw,format=F32LE,rate={rate},channels=1 ! "
-                "appsink name=sink emit-signals=false max-buffers=8 drop=false sync=false"
-            )
-            sink = pipeline.get_by_name("sink")
-            pipeline.set_state(Gst.State.PLAYING)
-        except Exception:
-            log.exception("could not start audio capture for the scope visualizer")
-            return
-
-        try:
-            while True:
-                sample = sink.emit("try-pull-sample", Gst.CLOCK_TIME_NONE)
-                if sample is None:
-                    continue
-                buf = sample.get_buffer()
-                ok, mapinfo = buf.map(Gst.MapFlags.READ)
-                if not ok:
-                    continue
-                try:
-                    data = array.array("f")
-                    data.frombytes(bytes(mapinfo.data))
-                finally:
-                    buf.unmap(mapinfo)
-                if data:
-                    self.samples = (self.samples + list(data))[-self.window:]
-        finally:
-            pipeline.set_state(Gst.State.NULL)
+    def _pump(self, Gst, pipeline) -> None:
+        sink = pipeline.get_by_name("sink")
+        bus = pipeline.get_bus()
+        while True:
+            # A timeout, not an indefinite wait: a pipeline that died on an
+            # error never hands over another sample, so this is how we notice.
+            sample = sink.emit("try-pull-sample", Gst.SECOND)
+            if sample is None:
+                if self._failed(Gst, bus) or sink.is_eos() or self._output_changed():
+                    return
+                continue
+            buf = sample.get_buffer()
+            ok, mapinfo = buf.map(Gst.MapFlags.READ)
+            if not ok:
+                continue
+            try:
+                data = array.array("f")
+                data.frombytes(bytes(mapinfo.data))
+            finally:
+                buf.unmap(mapinfo)
+            if data:
+                self.samples = (self.samples + list(data))[-self.window:]
+            if self._output_changed():
+                return
 
 
 def music_frames(info: PanelInfo, style: str, fps: int = 30, theme=None,

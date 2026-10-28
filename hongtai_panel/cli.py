@@ -49,6 +49,12 @@ def open_panel(args) -> Panel:
                 f"  {Path(sys.argv[0]).name} install-udev\n"
                 f"then unplug and replug the panel."
             ) from None
+        if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK) or "exclusively lock" in str(exc):
+            raise SystemExit(
+                f"{port} is in use by another process, most likely the service.\n"
+                f"Stop it first:  systemctl --user stop hongtai-panel\n"
+                f"and start it again afterwards:  systemctl --user start hongtai-panel"
+            ) from None
         raise SystemExit(f"Could not open {port}: {exc}") from None
     info = panel.connect(max_kb_override=getattr(args, "max_kb", 0) or 0)
     log.info(
